@@ -1,9 +1,9 @@
 use crate::{
     constants::{
-        MANAGER_SEED, RUSSIAN_ROULETTE_PARTICIPATION_FEE, RUSSIAN_ROULETTE_PLAYER_COUNT,
+        MANAGER_SEED, RUSSIAN_ROULETTE_PLAYER_COUNT, RUSSIAN_ROULETTE_SEED,
         RUSSIAN_ROULETTE_STATUS_DRAWN, RUSSIAN_ROULETTE_STATUS_OPEN,
-        RUSSIAN_ROULETTE_STATUS_PENDING, RUSSIAN_ROULETTE_VRF_CALLBACK_TAG,
-        RUSSIAN_ROULETTE_VRF_SEED, UNLUCKY_PLAYER_INDEX_NONE,
+        RUSSIAN_ROULETTE_STATUS_PENDING, RUSSIAN_ROULETTE_TABLE_COUNT,
+        RUSSIAN_ROULETTE_VRF_CALLBACK_TAG, RUSSIAN_ROULETTE_VRF_SEED, UNLUCKY_PLAYER_INDEX_NONE,
     },
     error::RPSProgramError::{
         ArithmeticError, InvalidGameAccount, InvalidGameState, InvalidManager, InvalidPlayer,
@@ -123,6 +123,7 @@ impl RussianRoulette {
         }
 
         let mut game = RussianRouletteGame::try_from_slice(&game_account.data.borrow())?;
+        Self::validate_game_account(game_account, &game, program_id)?;
         if game.round_id != expected_round_id {
             return Err(InvalidGameState.into());
         }
@@ -143,10 +144,14 @@ impl RussianRoulette {
         Self::load_fee_manager(manager_account, program_id)?;
         Self::validate_player_accounts(&game, &player_accounts)?;
 
-        let vrf_seed = Self::vrf_request_seed(game_account.key, game.table_id, game.round_id);
+        let request_slot = Clock::get()?.slot;
+        let vrf_seed =
+            Self::vrf_request_seed(game_account.key, game.table_id, game.round_id, request_slot);
+        let callback_args = Self::vrf_callback_args(game.round_id, &vrf_seed);
         let callback_accounts = [(*game_account.key, false, true)];
         MagicBlockVrf::request_randomness_with_callback_accounts(
             RUSSIAN_ROULETTE_VRF_CALLBACK_TAG,
+            &callback_args,
             payer,
             vrf_request_identity,
             oracle_queue,
@@ -187,15 +192,15 @@ impl RussianRoulette {
         let seat_4_account: &AccountInfo<'_> = next_account_info(accounts_iter)?;
         let seat_5_account: &AccountInfo<'_> = next_account_info(accounts_iter)?;
         let seat_6_account: &AccountInfo<'_> = next_account_info(accounts_iter)?;
+        let config_account: &AccountInfo<'_> = next_account_info(accounts_iter)?;
 
-        if !payer.is_signer {
-            return Err(PlayerNotSigner.into());
-        }
+        Utils::check_admin(payer, config_account, program_id)?;
         if game_account.owner != program_id {
             return Err(InvalidGameAccount.into());
         }
 
-        let mut game = RussianRouletteGame::try_from_slice(&game_account.data.borrow())?;
+        let game = RussianRouletteGame::try_from_slice(&game_account.data.borrow())?;
+        Self::validate_game_account(game_account, &game, program_id)?;
         if game.round_id != expected_round_id {
             return Err(InvalidGameState.into());
         }
@@ -220,15 +225,20 @@ impl RussianRoulette {
         Self::load_fee_manager(manager_account, program_id)?;
         Self::validate_player_accounts(&game, &player_accounts)?;
 
-        let vrf_seed = Self::retry_vrf_request_seed(
+        let request_seed = game.vrf_seed;
+        let retry_slot = Clock::get()?.slot;
+        let retry_caller_seed = Self::retry_vrf_request_seed(
             game_account.key,
             game.table_id,
             game.round_id,
-            &game.vrf_seed,
-        )?;
+            &request_seed,
+            retry_slot,
+        );
+        let callback_args = Self::vrf_callback_args(game.round_id, &request_seed);
         let callback_accounts = [(*game_account.key, false, true)];
         MagicBlockVrf::request_randomness_with_callback_accounts(
             RUSSIAN_ROULETTE_VRF_CALLBACK_TAG,
+            &callback_args,
             payer,
             vrf_request_identity,
             oracle_queue,
@@ -237,12 +247,8 @@ impl RussianRoulette {
             vrf_program_account,
             program_id,
             &callback_accounts,
-            vrf_seed,
+            retry_caller_seed,
         )?;
-
-        game.unlucky_player_index = UNLUCKY_PLAYER_INDEX_NONE;
-        game.vrf_seed = vrf_seed;
-        game.serialize(&mut &mut game_account.data.borrow_mut()[..])?;
 
         Ok(())
     }
@@ -313,7 +319,11 @@ impl RussianRoulette {
         let survivor_count = (RUSSIAN_ROULETTE_PLAYER_COUNT - 1) as u64;
         let survivor_payout = game
             .stake
-            .checked_add(game.stake.checked_div(survivor_count).ok_or(ArithmeticError)?)
+            .checked_add(
+                game.stake
+                    .checked_div(survivor_count)
+                    .ok_or(ArithmeticError)?,
+            )
             .ok_or(ArithmeticError)?;
         for (index, account) in player_accounts.iter().enumerate() {
             let is_loser = index == game.unlucky_player_index as usize;
@@ -333,6 +343,8 @@ impl RussianRoulette {
     pub fn consume_vrf_randomness(
         accounts: &[AccountInfo],
         program_id: &Pubkey,
+        expected_round_id: u64,
+        expected_vrf_seed: [u8; 32],
         randomness: [u8; 32],
     ) -> ProgramResult {
         let accounts_iter: &mut std::slice::Iter<'_, AccountInfo<'_>> = &mut accounts.iter();
@@ -346,6 +358,10 @@ impl RussianRoulette {
         }
 
         let mut game = RussianRouletteGame::try_from_slice(&game_account.data.borrow())?;
+        Self::validate_game_account(game_account, &game, program_id)?;
+        if game.round_id != expected_round_id || game.vrf_seed != expected_vrf_seed {
+            return Err(InvalidGameState.into());
+        }
         if game.draw_status != RUSSIAN_ROULETTE_STATUS_PENDING {
             return Err(InvalidGameState.into());
         }
@@ -388,9 +404,7 @@ impl RussianRoulette {
         }
 
         let mut game = RussianRouletteGame::try_from_slice(&game_account.data.borrow())?;
-        if game.round_id != expected_round_id
-            || game.draw_status != RUSSIAN_ROULETTE_STATUS_DRAWN
-        {
+        if game.round_id != expected_round_id || game.draw_status != RUSSIAN_ROULETTE_STATUS_DRAWN {
             return Err(InvalidGameState.into());
         }
 
@@ -406,10 +420,7 @@ impl RussianRoulette {
         system_program_account: &AccountInfo<'a>,
         game: &RussianRouletteGame,
     ) -> ProgramResult {
-        let amount = game
-            .stake
-            .checked_add(RUSSIAN_ROULETTE_PARTICIPATION_FEE)
-            .ok_or(ArithmeticError)?;
+        let amount = Self::participation_payment_amount(game)?;
         invoke(
             &transfer(player.key, game_account.key, amount),
             &[
@@ -475,9 +486,7 @@ impl RussianRoulette {
             .stake
             .checked_add(survivor_bonus)
             .ok_or(ArithmeticError)?;
-        let participation_fee_total = RUSSIAN_ROULETTE_PARTICIPATION_FEE
-            .checked_mul(RUSSIAN_ROULETTE_PLAYER_COUNT as u64)
-            .ok_or(ArithmeticError)?;
+        let participation_fee_total = Self::participation_fee_total(game)?;
         let fee_total = participation_fee_total
             .checked_add(remainder)
             .ok_or(ArithmeticError)?;
@@ -574,6 +583,24 @@ impl RussianRoulette {
         Ok(())
     }
 
+    fn validate_game_account(
+        game_account: &AccountInfo,
+        game: &RussianRouletteGame,
+        program_id: &Pubkey,
+    ) -> ProgramResult {
+        if game_account.owner != program_id || game.table_id >= RUSSIAN_ROULETTE_TABLE_COUNT {
+            return Err(InvalidGameAccount.into());
+        }
+        let table_id = [game.table_id];
+        let expected_address =
+            Pubkey::find_program_address(&[RUSSIAN_ROULETTE_SEED, &table_id], program_id).0;
+        if game_account.key != &expected_address {
+            return Err(InvalidGameAccount.into());
+        }
+
+        Ok(())
+    }
+
     fn clear_table_for_next_round(game: &mut RussianRouletteGame) -> ProgramResult {
         game.round_id = game.round_id.checked_add(1).ok_or(ArithmeticError)?;
         game.draw_status = RUSSIAN_ROULETTE_STATUS_OPEN;
@@ -587,18 +614,34 @@ impl RussianRoulette {
         game.unlucky_player_index = UNLUCKY_PLAYER_INDEX_NONE;
         game.vrf_seed = [0; 32];
         game.unlucky_player = [0; 32];
-        game.program_fee = RUSSIAN_ROULETTE_PARTICIPATION_FEE;
-
         Ok(())
     }
 
-    fn vrf_request_seed(game_address: &Pubkey, table_id: u8, round_id: u64) -> [u8; 32] {
+    fn participation_payment_amount(game: &RussianRouletteGame) -> Result<u64, ProgramError> {
+        game.stake
+            .checked_add(game.program_fee)
+            .ok_or(ArithmeticError.into())
+    }
+
+    fn participation_fee_total(game: &RussianRouletteGame) -> Result<u64, ProgramError> {
+        game.program_fee
+            .checked_mul(RUSSIAN_ROULETTE_PLAYER_COUNT as u64)
+            .ok_or(ArithmeticError.into())
+    }
+
+    fn vrf_request_seed(
+        game_address: &Pubkey,
+        table_id: u8,
+        round_id: u64,
+        request_slot: u64,
+    ) -> [u8; 32] {
         hash(
             &[
                 RUSSIAN_ROULETTE_VRF_SEED,
                 game_address.as_ref(),
                 &[table_id],
                 &round_id.to_le_bytes(),
+                &request_slot.to_le_bytes(),
             ]
             .concat(),
         )
@@ -610,10 +653,9 @@ impl RussianRoulette {
         table_id: u8,
         round_id: u64,
         previous_seed: &[u8; 32],
-    ) -> Result<[u8; 32], ProgramError> {
-        let slot = Clock::get()?.slot;
-
-        Ok(hash(
+        request_slot: u64,
+    ) -> [u8; 32] {
+        hash(
             &[
                 RUSSIAN_ROULETTE_VRF_SEED,
                 b"retry",
@@ -621,11 +663,18 @@ impl RussianRoulette {
                 &[table_id],
                 &round_id.to_le_bytes(),
                 previous_seed,
-                &slot.to_le_bytes(),
+                &request_slot.to_le_bytes(),
             ]
             .concat(),
         )
-        .to_bytes())
+        .to_bytes()
+    }
+
+    fn vrf_callback_args(round_id: u64, vrf_seed: &[u8; 32]) -> [u8; 40] {
+        let mut callback_args = [0u8; 40];
+        callback_args[..8].copy_from_slice(&round_id.to_le_bytes());
+        callback_args[8..].copy_from_slice(vrf_seed);
+        callback_args
     }
 
     fn unlucky_player_index(randomness: &[u8; 32]) -> u8 {
@@ -636,5 +685,373 @@ impl RussianRoulette {
         let mut bytes = [0u8; 8];
         bytes.copy_from_slice(&randomness[..8]);
         u64::from_le_bytes(bytes)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn game(program_fee: u64) -> RussianRouletteGame {
+        RussianRouletteGame {
+            table_id: 0,
+            round_id: 9,
+            draw_status: RUSSIAN_ROULETTE_STATUS_DRAWN,
+            number_of_players: RUSSIAN_ROULETTE_PLAYER_COUNT,
+            stake: 100_000_000,
+            program_fee,
+            seat_1: [1; 32],
+            seat_2: [2; 32],
+            seat_3: [3; 32],
+            seat_4: [4; 32],
+            seat_5: [5; 32],
+            seat_6: [6; 32],
+            unlucky_player_index: 2,
+            vrf_seed: [7; 32],
+            unlucky_player: [3; 32],
+        }
+    }
+
+    #[test]
+    fn configured_fee_drives_participation_payment_and_settlement_total() {
+        let game = game(25_000_000);
+
+        assert_eq!(
+            RussianRoulette::participation_payment_amount(&game).unwrap(),
+            125_000_000
+        );
+        assert_eq!(
+            RussianRoulette::participation_fee_total(&game).unwrap(),
+            150_000_000
+        );
+    }
+
+    #[test]
+    fn roulette_table_layout_remains_compatible() {
+        assert_eq!(
+            borsh::to_vec(&game(25_000_000)).unwrap().len(),
+            crate::constants::RUSSIAN_ROULETTE_GAME_SPACE as usize
+        );
+    }
+
+    #[test]
+    fn initial_request_seed_changes_when_request_slot_changes() {
+        let table_address = Pubkey::new_unique();
+        let first = RussianRoulette::vrf_request_seed(&table_address, 0, 1, 1_000);
+        let second = RussianRoulette::vrf_request_seed(&table_address, 0, 1, 1_001);
+
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn callback_args_bind_round_and_request_seed() {
+        let round_id = 17;
+        let vrf_seed = [31u8; 32];
+        let callback_args = RussianRoulette::vrf_callback_args(round_id, &vrf_seed);
+
+        assert_eq!(&callback_args[..8], &round_id.to_le_bytes());
+        assert_eq!(&callback_args[8..], &vrf_seed);
+    }
+
+    #[test]
+    fn callback_validation_requires_the_exact_table_pda() {
+        let program_id = Pubkey::new_unique();
+        let game = game(25_000_000);
+        let table_id = [game.table_id];
+        let expected_address =
+            Pubkey::find_program_address(&[RUSSIAN_ROULETTE_SEED, &table_id], &program_id).0;
+        let wrong_address = Pubkey::new_unique();
+        let mut expected_lamports = 0;
+        let mut wrong_lamports = 0;
+        let mut expected_data = [];
+        let mut wrong_data = [];
+        let expected_account = AccountInfo::new(
+            &expected_address,
+            false,
+            true,
+            &mut expected_lamports,
+            &mut expected_data,
+            &program_id,
+            false,
+        );
+        let wrong_account = AccountInfo::new(
+            &wrong_address,
+            false,
+            true,
+            &mut wrong_lamports,
+            &mut wrong_data,
+            &program_id,
+            false,
+        );
+
+        assert!(
+            RussianRoulette::validate_game_account(&expected_account, &game, &program_id).is_ok()
+        );
+        assert_eq!(
+            RussianRoulette::validate_game_account(&wrong_account, &game, &program_id).unwrap_err(),
+            ProgramError::from(InvalidGameAccount)
+        );
+    }
+
+    #[test]
+    fn retries_use_unique_caller_seeds_without_rotating_callback_identity() {
+        let table_address = Pubkey::new_unique();
+        let request_seed = [37u8; 32];
+        let first =
+            RussianRoulette::retry_vrf_request_seed(&table_address, 1, 23, &request_seed, 2_000);
+        let second =
+            RussianRoulette::retry_vrf_request_seed(&table_address, 1, 23, &request_seed, 2_001);
+
+        assert_ne!(first, second);
+        let callback_args = RussianRoulette::vrf_callback_args(23, &request_seed);
+        assert_eq!(&callback_args[8..], &request_seed);
+        assert_ne!(&callback_args[8..], &first);
+        assert_ne!(&callback_args[8..], &second);
+    }
+
+    #[test]
+    fn stale_create_and_join_transactions_fail_before_collecting_payment() {
+        let mut table = game(25_000_000);
+        table.draw_status = RUSSIAN_ROULETTE_STATUS_OPEN;
+        table.number_of_players = 0;
+        table.seat_1 = [0; 32];
+        table.seat_2 = [0; 32];
+        table.seat_3 = [0; 32];
+        table.seat_4 = [0; 32];
+        table.seat_5 = [0; 32];
+        table.seat_6 = [0; 32];
+
+        let program_id = Pubkey::new_unique();
+        let player_key = Pubkey::new_unique();
+        let game_key = Pubkey::new_unique();
+        let system_program_key = solana_system_interface::program::ID;
+        let system_owner = solana_system_interface::program::ID;
+        let starting_player_balance = 200_000_000;
+        let mut player_lamports = starting_player_balance;
+        let mut game_lamports = 2_000_000;
+        let mut system_lamports = 0;
+        let mut player_data = [];
+        let mut game_data = borsh::to_vec(&table).unwrap();
+        let mut system_data = [];
+        let player_account = AccountInfo::new(
+            &player_key,
+            true,
+            true,
+            &mut player_lamports,
+            &mut player_data,
+            &system_owner,
+            false,
+        );
+        let game_account = AccountInfo::new(
+            &game_key,
+            false,
+            true,
+            &mut game_lamports,
+            &mut game_data,
+            &program_id,
+            false,
+        );
+        let system_program_account = AccountInfo::new(
+            &system_program_key,
+            false,
+            false,
+            &mut system_lamports,
+            &mut system_data,
+            &system_owner,
+            true,
+        );
+        let accounts = [player_account, game_account, system_program_account];
+
+        assert_eq!(
+            RussianRoulette::create_game(
+                &accounts,
+                &program_id,
+                InitRussianRoulette {
+                    table_id: table.table_id,
+                    seat: 1,
+                    expected_round_id: table.round_id - 1,
+                },
+            )
+            .unwrap_err(),
+            ProgramError::from(InvalidGameState)
+        );
+        assert_eq!(
+            RussianRoulette::join_game(
+                &accounts,
+                &program_id,
+                JoinRussianRoulette {
+                    seat: 1,
+                    expected_round_id: table.round_id - 1,
+                },
+            )
+            .unwrap_err(),
+            ProgramError::from(InvalidGameState)
+        );
+        assert_eq!(
+            **accounts[0].try_borrow_lamports().unwrap(),
+            starting_player_balance
+        );
+        let expected_table_data = borsh::to_vec(&table).unwrap();
+        assert_eq!(&**accounts[1].data.borrow(), expected_table_data.as_slice());
+    }
+
+    #[test]
+    fn settlement_moves_the_configured_fee_and_preserves_the_table_balance() {
+        let mut game = game(25_000_000);
+        game.draw_status = RUSSIAN_ROULETTE_STATUS_PENDING;
+        game.stake = 100_000_003;
+        let mut manager = Manager {
+            is_init: 1,
+            allowed_time: 0,
+            fee_percentage: 0,
+            minimum_stake: 0,
+            collected_fee: 11,
+        };
+
+        let program_id = Pubkey::new_unique();
+        let system_owner = solana_system_interface::program::ID;
+        let game_key = Pubkey::new_unique();
+        let manager_key = Pubkey::new_unique();
+        let player_1_key = Pubkey::new_from_array(game.seat_1);
+        let player_2_key = Pubkey::new_from_array(game.seat_2);
+        let player_3_key = Pubkey::new_from_array(game.seat_3);
+        let player_4_key = Pubkey::new_from_array(game.seat_4);
+        let player_5_key = Pubkey::new_from_array(game.seat_5);
+        let player_6_key = Pubkey::new_from_array(game.seat_6);
+
+        let table_balance = 2_000_000;
+        let deposited_balance = (game.stake + game.program_fee) * 6;
+        let manager_starting_balance = 3_000_000;
+        let mut game_lamports = table_balance + deposited_balance;
+        let mut manager_lamports = manager_starting_balance;
+        let mut player_1_lamports = 0;
+        let mut player_2_lamports = 0;
+        let mut player_3_lamports = 0;
+        let mut player_4_lamports = 0;
+        let mut player_5_lamports = 0;
+        let mut player_6_lamports = 0;
+        let mut game_data = [];
+        let mut manager_data = [];
+        let mut player_1_data = [];
+        let mut player_2_data = [];
+        let mut player_3_data = [];
+        let mut player_4_data = [];
+        let mut player_5_data = [];
+        let mut player_6_data = [];
+
+        let game_account = AccountInfo::new(
+            &game_key,
+            false,
+            true,
+            &mut game_lamports,
+            &mut game_data,
+            &program_id,
+            false,
+        );
+        let manager_account = AccountInfo::new(
+            &manager_key,
+            false,
+            true,
+            &mut manager_lamports,
+            &mut manager_data,
+            &program_id,
+            false,
+        );
+        let player_1 = AccountInfo::new(
+            &player_1_key,
+            false,
+            true,
+            &mut player_1_lamports,
+            &mut player_1_data,
+            &system_owner,
+            false,
+        );
+        let player_2 = AccountInfo::new(
+            &player_2_key,
+            false,
+            true,
+            &mut player_2_lamports,
+            &mut player_2_data,
+            &system_owner,
+            false,
+        );
+        let player_3 = AccountInfo::new(
+            &player_3_key,
+            false,
+            true,
+            &mut player_3_lamports,
+            &mut player_3_data,
+            &system_owner,
+            false,
+        );
+        let player_4 = AccountInfo::new(
+            &player_4_key,
+            false,
+            true,
+            &mut player_4_lamports,
+            &mut player_4_data,
+            &system_owner,
+            false,
+        );
+        let player_5 = AccountInfo::new(
+            &player_5_key,
+            false,
+            true,
+            &mut player_5_lamports,
+            &mut player_5_data,
+            &system_owner,
+            false,
+        );
+        let player_6 = AccountInfo::new(
+            &player_6_key,
+            false,
+            true,
+            &mut player_6_lamports,
+            &mut player_6_data,
+            &system_owner,
+            false,
+        );
+        let player_accounts = [
+            &player_1, &player_2, &player_3, &player_4, &player_5, &player_6,
+        ];
+
+        RussianRoulette::settle_draw(
+            &game_account,
+            &manager_account,
+            &player_accounts,
+            &mut game,
+            &mut manager,
+        )
+        .unwrap();
+
+        let remainder = game.stake % 5;
+        let fee_total = game.program_fee * 6 + remainder;
+        let survivor_payout = game.stake + game.stake / 5;
+        assert_eq!(**game_account.try_borrow_lamports().unwrap(), table_balance);
+        assert_eq!(
+            **manager_account.try_borrow_lamports().unwrap(),
+            manager_starting_balance + fee_total
+        );
+        assert_eq!(manager.collected_fee, 11 + fee_total);
+        for (index, player) in player_accounts.iter().enumerate() {
+            assert_eq!(
+                **player.try_borrow_lamports().unwrap(),
+                if index == 2 { 0 } else { survivor_payout }
+            );
+        }
+        assert_eq!(game.draw_status, RUSSIAN_ROULETTE_STATUS_DRAWN);
+        assert_eq!(game.unlucky_player, player_3_key.to_bytes());
+    }
+
+    #[test]
+    fn resetting_a_table_preserves_its_configured_fee() {
+        let mut game = game(25_000_000);
+
+        RussianRoulette::clear_table_for_next_round(&mut game).unwrap();
+
+        assert_eq!(game.round_id, 10);
+        assert_eq!(game.program_fee, 25_000_000);
+        assert_eq!(game.draw_status, RUSSIAN_ROULETTE_STATUS_OPEN);
+        assert_eq!(game.number_of_players, 0);
     }
 }

@@ -21,6 +21,7 @@ pub struct MagicBlockVrf;
 impl MagicBlockVrf {
     pub fn request_randomness<'a>(
         callback_tag: u8,
+        callback_args: &[u8],
         payer: &AccountInfo<'a>,
         request_identity: &AccountInfo<'a>,
         oracle_queue: &AccountInfo<'a>,
@@ -33,6 +34,7 @@ impl MagicBlockVrf {
     ) -> ProgramResult {
         Self::request_randomness_with_callback_accounts(
             callback_tag,
+            callback_args,
             payer,
             request_identity,
             oracle_queue,
@@ -47,6 +49,7 @@ impl MagicBlockVrf {
 
     pub fn request_randomness_with_callback_accounts<'a>(
         callback_tag: u8,
+        callback_args: &[u8],
         payer: &AccountInfo<'a>,
         request_identity: &AccountInfo<'a>,
         oracle_queue: &AccountInfo<'a>,
@@ -82,6 +85,7 @@ impl MagicBlockVrf {
             *callback_program_id,
             caller_seed,
             callback_tag,
+            callback_args,
             callback_accounts,
         );
 
@@ -124,6 +128,7 @@ impl MagicBlockVrf {
         callback_program_id: Pubkey,
         caller_seed: [u8; 32],
         callback_tag: u8,
+        callback_args: &[u8],
         callback_accounts: &[(Pubkey, bool, bool)],
     ) -> Instruction {
         let program_identity = Pubkey::find_program_address(&[IDENTITY], &callback_program_id).0;
@@ -140,7 +145,7 @@ impl MagicBlockVrf {
             data.push(u8::from(*is_writable));
         }
 
-        Self::extend_vec(&mut data, &[]);
+        Self::extend_vec(&mut data, callback_args);
 
         Instruction {
             program_id: VRF_PROGRAM_ID,
@@ -158,5 +163,66 @@ impl MagicBlockVrf {
     fn extend_vec(data: &mut Vec<u8>, bytes: &[u8]) {
         data.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
         data.extend_from_slice(bytes);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn request_serialization_uses_one_byte_discriminator_and_authenticated_callback_args() {
+        let payer = Pubkey::new_unique();
+        let queue = Pubkey::new_unique();
+        let callback_program_id = Pubkey::new_unique();
+        let callback_account = Pubkey::new_unique();
+        let caller_seed = [41u8; 32];
+        let mut callback_args = vec![];
+        callback_args.extend_from_slice(&17u64.to_le_bytes());
+        callback_args.extend_from_slice(&[43u8; 32]);
+
+        let instruction = MagicBlockVrf::request_scoped_randomness_instruction(
+            payer,
+            queue,
+            callback_program_id,
+            caller_seed,
+            92,
+            &callback_args,
+            &[(callback_account, false, true)],
+        );
+
+        let discriminator_length_offset = 8 + 32 + 32;
+        let discriminator_offset = discriminator_length_offset + 4;
+        assert_eq!(
+            u32::from_le_bytes(
+                instruction.data[discriminator_length_offset..discriminator_offset]
+                    .try_into()
+                    .unwrap()
+            ) as usize,
+            1
+        );
+        assert_eq!(instruction.data[discriminator_offset], 92);
+
+        let account_count_offset = discriminator_offset + 1;
+        let account_metas_offset = account_count_offset + 4;
+        let account_count = u32::from_le_bytes(
+            instruction.data[account_count_offset..account_metas_offset]
+                .try_into()
+                .unwrap(),
+        ) as usize;
+        let callback_args_length_offset = account_metas_offset + account_count * 34;
+        let callback_args_offset = callback_args_length_offset + 4;
+        assert_eq!(
+            u32::from_le_bytes(
+                instruction.data[callback_args_length_offset..callback_args_offset]
+                    .try_into()
+                    .unwrap(),
+            ) as usize,
+            callback_args.len()
+        );
+        assert_eq!(
+            &instruction.data[callback_args_offset..callback_args_offset + callback_args.len()],
+            callback_args.as_slice()
+        );
     }
 }

@@ -173,6 +173,7 @@ impl Raffle {
         let vrf_seed = Self::vrf_request_seed(raffle_account.key, raffle.raffle_no);
         MagicBlockVrf::request_randomness(
             RAFFLE_VRF_CALLBACK_TAG,
+            &[],
             payer,
             vrf_request_identity,
             oracle_queue,
@@ -232,11 +233,7 @@ impl Raffle {
         if winning_ticket.raffle_no != raffle.raffle_no
             || winning_ticket.ticket_no != raffle.winning_ticket_no
             || winning_ticket_account.key
-                != &Self::ticket_address(
-                    program_id,
-                    raffle.raffle_no,
-                    raffle.winning_ticket_no,
-                )
+                != &Self::ticket_address(program_id, raffle.raffle_no, raffle.winning_ticket_no)
         {
             return Err(InvalidTicketAccount.into());
         }

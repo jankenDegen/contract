@@ -2,8 +2,8 @@ use crate::{
     constants::{
         CONFIG_SEED, CONFIG_SPACE, DICE_MANAGER_SEED, DICE_MANAGER_SPACE, MANAGER_SEED,
         MANAGER_SPACE, RAFFLE_MANAGER_SEED, RAFFLE_MANAGER_SPACE, RUSSIAN_ROULETTE_GAME_SPACE,
-        RUSSIAN_ROULETTE_PARTICIPATION_FEE, RUSSIAN_ROULETTE_PLAYER_COUNT, RUSSIAN_ROULETTE_SEED,
-        RUSSIAN_ROULETTE_STATUS_OPEN, RUSSIAN_ROULETTE_TABLE_COUNT, UNLUCKY_PLAYER_INDEX_NONE,
+        RUSSIAN_ROULETTE_PLAYER_COUNT, RUSSIAN_ROULETTE_SEED, RUSSIAN_ROULETTE_STATUS_OPEN,
+        RUSSIAN_ROULETTE_TABLE_COUNT, UNLUCKY_PLAYER_INDEX_NONE,
     },
     error::RPSProgramError::InvalidRussianRouletteConfiguration,
     state::{
@@ -179,7 +179,11 @@ impl Init {
     fn validate_roulette_table_config(table_id: u8, stake: u64, program_fee: u64) -> ProgramResult {
         if table_id >= RUSSIAN_ROULETTE_TABLE_COUNT
             || stake == 0
-            || program_fee != RUSSIAN_ROULETTE_PARTICIPATION_FEE
+            || program_fee >= stake
+            || stake
+                .checked_add(program_fee)
+                .and_then(|payment| payment.checked_mul(RUSSIAN_ROULETTE_PLAYER_COUNT as u64))
+                .is_none()
         {
             return Err(InvalidRussianRouletteConfiguration.into());
         }

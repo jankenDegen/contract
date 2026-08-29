@@ -22,6 +22,7 @@ use solana_program::{
     program::invoke,
     program_error::ProgramError,
     pubkey::Pubkey,
+    sysvar::{clock::Clock, Sysvar},
 };
 use solana_system_interface::instruction::transfer;
 
@@ -201,6 +202,7 @@ impl Dice {
         }
 
         let mut dice = DiceGame::try_from_slice(&dice_account.data.borrow())?;
+        Self::validate_game_account(dice_account, &dice, program_id)?;
         if dice.number_of_players != DICE_PLAYER_COUNT {
             return Err(DiceGameNotReady.into());
         }
@@ -208,9 +210,11 @@ impl Dice {
             return Err(DiceDrawAlreadyRequested.into());
         }
 
-        let vrf_seed = Self::vrf_request_seed(dice_account.key, dice.game_id);
+        let request_slot = Clock::get()?.slot;
+        let vrf_seed = Self::vrf_request_seed(dice_account.key, dice.game_id, request_slot);
         MagicBlockVrf::request_randomness(
             DICE_VRF_CALLBACK_TAG,
+            &vrf_seed,
             payer,
             vrf_request_identity,
             oracle_queue,
@@ -317,7 +321,11 @@ impl Dice {
         );
         for (index, account) in player_accounts.iter().enumerate() {
             let face = dice.chosen_dices[index];
-            let outcome = if index == winner_index { "winner" } else { "loser" };
+            let outcome = if index == winner_index {
+                "winner"
+            } else {
+                "loser"
+            };
             let payout = if index == winner_index { prize } else { 0 };
             msg!(
                 "dice_player_result face={} address={} outcome={} stake_lamports={} payout_lamports={}",
@@ -332,9 +340,32 @@ impl Dice {
         Ok(())
     }
 
+    pub fn consume_legacy_vrf_randomness(
+        accounts: &[AccountInfo],
+        program_id: &Pubkey,
+        randomness: [u8; 32],
+    ) -> ProgramResult {
+        Self::consume_vrf_randomness_inner(accounts, program_id, None, randomness)
+    }
+
     pub fn consume_vrf_randomness(
         accounts: &[AccountInfo],
         program_id: &Pubkey,
+        expected_vrf_seed: [u8; 32],
+        randomness: [u8; 32],
+    ) -> ProgramResult {
+        Self::consume_vrf_randomness_inner(
+            accounts,
+            program_id,
+            Some(expected_vrf_seed),
+            randomness,
+        )
+    }
+
+    fn consume_vrf_randomness_inner(
+        accounts: &[AccountInfo],
+        program_id: &Pubkey,
+        expected_vrf_seed: Option<[u8; 32]>,
         randomness: [u8; 32],
     ) -> ProgramResult {
         let accounts_iter: &mut std::slice::Iter<'_, AccountInfo<'_>> = &mut accounts.iter();
@@ -348,11 +379,17 @@ impl Dice {
         }
 
         let mut dice = DiceGame::try_from_slice(&dice_account.data.borrow())?;
+        Self::validate_game_account(dice_account, &dice, program_id)?;
         if dice.draw_status != DICE_STATUS_PENDING {
             return Err(InvalidGameState.into());
         }
         if dice.winning_dice != UNDRAWN_DICE_NO {
             return Err(DiceDrawAlreadyRequested.into());
+        }
+        let required_vrf_seed = expected_vrf_seed
+            .unwrap_or_else(|| Self::legacy_vrf_request_seed(dice_account.key, dice.game_id));
+        if dice.vrf_seed != required_vrf_seed {
+            return Err(InvalidGameState.into());
         }
 
         let random_number = Self::randomness_number(&randomness);
@@ -465,9 +502,41 @@ impl Dice {
         Ok(())
     }
 
-    fn vrf_request_seed(dice_address: &Pubkey, game_id: u64) -> [u8; 32] {
+    fn validate_game_account(
+        dice_account: &AccountInfo,
+        dice: &DiceGame,
+        program_id: &Pubkey,
+    ) -> ProgramResult {
+        if dice_account.owner != program_id {
+            return Err(InvalidGameAccount.into());
+        }
+        let expected_address =
+            Pubkey::find_program_address(&[DICE_SEED, &dice.game_id.to_le_bytes()], program_id).0;
+        if dice_account.key != &expected_address {
+            return Err(InvalidGameAccount.into());
+        }
+
+        Ok(())
+    }
+
+    fn legacy_vrf_request_seed(dice_address: &Pubkey, game_id: u64) -> [u8; 32] {
         let game_id_bytes = game_id.to_le_bytes();
         hash(&[DICE_VRF_SEED, dice_address.as_ref(), &game_id_bytes].concat()).to_bytes()
+    }
+
+    fn vrf_request_seed(dice_address: &Pubkey, game_id: u64, request_slot: u64) -> [u8; 32] {
+        let game_id_bytes = game_id.to_le_bytes();
+        let request_slot_bytes = request_slot.to_le_bytes();
+        hash(
+            &[
+                DICE_VRF_SEED,
+                dice_address.as_ref(),
+                &game_id_bytes,
+                &request_slot_bytes,
+            ]
+            .concat(),
+        )
+        .to_bytes()
     }
 
     fn winning_dice(randomness: &[u8; 32]) -> u8 {
@@ -478,5 +547,90 @@ impl Dice {
         let mut bytes = [0u8; 8];
         bytes.copy_from_slice(&randomness[..8]);
         u64::from_le_bytes(bytes)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn game(game_id: u64) -> DiceGame {
+        DiceGame {
+            game_id,
+            number_of_players: DICE_PLAYER_COUNT,
+            stake: 100_000_000,
+            initializer: [1; 32],
+            player_2: [2; 32],
+            player_3: [3; 32],
+            player_4: [4; 32],
+            player_5: [5; 32],
+            player_6: [6; 32],
+            chosen_dices: [1, 2, 3, 4, 5, 6],
+            draw_status: DICE_STATUS_PENDING,
+            winning_dice: UNDRAWN_DICE_NO,
+            vrf_seed: [0; 32],
+            winner: [0; 32],
+        }
+    }
+
+    #[test]
+    fn request_seed_changes_when_request_slot_changes() {
+        let dice_address = Pubkey::new_unique();
+        let game_id: u64 = 42;
+        let first = Dice::vrf_request_seed(&dice_address, game_id, 1_000);
+        let second = Dice::vrf_request_seed(&dice_address, game_id, 1_001);
+
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn legacy_callbacks_cannot_match_new_slot_bound_requests() {
+        let program_id = Pubkey::new_unique();
+        let game_id: u64 = 42;
+        let game_id_bytes = game_id.to_le_bytes();
+        let dice_address =
+            Pubkey::find_program_address(&[DICE_SEED, &game_id_bytes], &program_id).0;
+        let legacy_seed = Dice::legacy_vrf_request_seed(&dice_address, game_id);
+        let new_seed = Dice::vrf_request_seed(&dice_address, game_id, 1_000);
+
+        assert_ne!(legacy_seed, new_seed);
+    }
+
+    #[test]
+    fn callback_validation_requires_the_exact_dice_pda() {
+        let program_id = Pubkey::new_unique();
+        let game = game(42);
+        let game_id_bytes = game.game_id.to_le_bytes();
+        let expected_address =
+            Pubkey::find_program_address(&[DICE_SEED, &game_id_bytes], &program_id).0;
+        let wrong_address = Pubkey::new_unique();
+        let mut expected_lamports = 0;
+        let mut wrong_lamports = 0;
+        let mut expected_data = [];
+        let mut wrong_data = [];
+        let expected_account = AccountInfo::new(
+            &expected_address,
+            false,
+            true,
+            &mut expected_lamports,
+            &mut expected_data,
+            &program_id,
+            false,
+        );
+        let wrong_account = AccountInfo::new(
+            &wrong_address,
+            false,
+            true,
+            &mut wrong_lamports,
+            &mut wrong_data,
+            &program_id,
+            false,
+        );
+
+        assert!(Dice::validate_game_account(&expected_account, &game, &program_id).is_ok());
+        assert_eq!(
+            Dice::validate_game_account(&wrong_account, &game, &program_id).unwrap_err(),
+            ProgramError::from(InvalidGameAccount)
+        );
     }
 }

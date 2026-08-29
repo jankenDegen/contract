@@ -1,7 +1,7 @@
 use crate::{
     constants::{
-        DICE_STATUS_DRAWN, RAFFLE_STATUS_DRAWN, RAFFLE_TICKET_COUNT,
-        RUSSIAN_ROULETTE_PARTICIPATION_FEE, RUSSIAN_ROULETTE_STATUS_OPEN,
+        DICE_STATUS_DRAWN, RAFFLE_STATUS_DRAWN, RAFFLE_TICKET_COUNT, RUSSIAN_ROULETTE_PLAYER_COUNT,
+        RUSSIAN_ROULETTE_SEED, RUSSIAN_ROULETTE_STATUS_OPEN,
     },
     error::RPSProgramError::{
         InvalidDiceConfiguration, InvalidFeePercentage, InvalidRaffleAccount,
@@ -9,7 +9,7 @@ use crate::{
     },
     state::{
         Config, DiceGame, DiceManager, Manager, RaffleManager, RaffleState, RussianRouletteGame,
-        UpdateRussianRouletteTable,
+        UpdateRussianRouletteParticipationFee, UpdateRussianRouletteTable,
     },
     utils::Utils,
 };
@@ -17,12 +17,13 @@ use borsh::{BorshDeserialize, BorshSerialize};
 use solana_program::{
     account_info::{next_account_info, AccountInfo},
     entrypoint::ProgramResult,
+    msg,
     pubkey::Pubkey,
 };
 use solana_system_interface::program as system_program;
 
 use crate::error::RPSProgramError::{
-    InvalidGameAccount, InvalidGameState, NotSignerAuth,
+    ArithmeticError, InvalidGameAccount, InvalidGameState, NotSignerAuth,
 };
 
 pub struct Admin;
@@ -152,20 +153,64 @@ impl Admin {
         let config_account: &AccountInfo<'_> = next_account_info(accounts_iter)?;
 
         Utils::check_admin(admin, config_account, program_id)?;
-        Self::validate_russian_roulette_table(new_table)?;
-        if table_account.owner != program_id {
-            return Err(InvalidGameAccount.into());
-        }
-
-        let mut table: RussianRouletteGame =
-            RussianRouletteGame::try_from_slice(&table_account.data.borrow())?;
+        let mut table = Self::load_russian_roulette_table(table_account, program_id)?;
         if table.draw_status != RUSSIAN_ROULETTE_STATUS_OPEN || table.number_of_players != 0 {
             return Err(InvalidGameState.into());
         }
+        Self::validate_russian_roulette_table(new_table)?;
+        if new_table.program_fee != table.program_fee {
+            return Err(InvalidRussianRouletteConfiguration.into());
+        }
 
-        table.stake = new_table.stake;
-        table.program_fee = new_table.program_fee;
+        if table.stake != new_table.stake {
+            table.stake = new_table.stake;
+            table.round_id = table.round_id.checked_add(1).ok_or(ArithmeticError)?;
+        }
         table.serialize(&mut &mut table_account.data.borrow_mut()[..])?;
+
+        Ok(())
+    }
+
+    pub fn set_russian_roulette_participation_fee(
+        accounts: &[AccountInfo],
+        program_id: &Pubkey,
+        update: UpdateRussianRouletteParticipationFee,
+    ) -> ProgramResult {
+        let accounts_iter: &mut std::slice::Iter<'_, AccountInfo<'_>> = &mut accounts.iter();
+
+        let admin: &AccountInfo<'_> = next_account_info(accounts_iter)?;
+        let table_account: &AccountInfo<'_> = next_account_info(accounts_iter)?;
+        let config_account: &AccountInfo<'_> = next_account_info(accounts_iter)?;
+
+        Utils::check_admin(admin, config_account, program_id)?;
+        let mut table = Self::load_russian_roulette_table(table_account, program_id)?;
+        if table.round_id != update.expected_round_id
+            || table.draw_status != RUSSIAN_ROULETTE_STATUS_OPEN
+            || table.number_of_players != 0
+        {
+            return Err(InvalidGameState.into());
+        }
+        Self::validate_russian_roulette_table(UpdateRussianRouletteTable {
+            stake: table.stake,
+            program_fee: update.program_fee,
+        })?;
+
+        if table.program_fee == update.program_fee {
+            return Ok(());
+        }
+
+        let previous_fee = table.program_fee;
+        table.program_fee = update.program_fee;
+        table.round_id = table.round_id.checked_add(1).ok_or(ArithmeticError)?;
+        table.serialize(&mut &mut table_account.data.borrow_mut()[..])?;
+
+        msg!(
+            "roulette_participation_fee_updated table_id={} round_id={} previous_fee_lamports={} program_fee_lamports={}",
+            table.table_id,
+            table.round_id,
+            previous_fee,
+            table.program_fee
+        );
 
         Ok(())
     }
@@ -332,10 +377,350 @@ impl Admin {
     }
 
     fn validate_russian_roulette_table(table: UpdateRussianRouletteTable) -> ProgramResult {
-        if table.stake == 0 || table.program_fee != RUSSIAN_ROULETTE_PARTICIPATION_FEE {
+        if table.stake == 0
+            || table.program_fee >= table.stake
+            || table
+                .stake
+                .checked_add(table.program_fee)
+                .and_then(|payment| payment.checked_mul(RUSSIAN_ROULETTE_PLAYER_COUNT as u64))
+                .is_none()
+        {
             return Err(InvalidRussianRouletteConfiguration.into());
         }
 
         Ok(())
+    }
+
+    fn load_russian_roulette_table(
+        table_account: &AccountInfo,
+        program_id: &Pubkey,
+    ) -> Result<RussianRouletteGame, solana_program::program_error::ProgramError> {
+        if table_account.owner != program_id {
+            return Err(InvalidGameAccount.into());
+        }
+
+        let table = RussianRouletteGame::try_from_slice(&table_account.data.borrow())?;
+        let table_id = [table.table_id];
+        let expected_table =
+            Pubkey::find_program_address(&[RUSSIAN_ROULETTE_SEED, &table_id], program_id).0;
+        if table_account.key != &expected_table {
+            return Err(InvalidGameAccount.into());
+        }
+
+        Ok(table)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::constants::{
+        RUSSIAN_ROULETTE_STATUS_DRAWN, RUSSIAN_ROULETTE_STATUS_PENDING, UNLUCKY_PLAYER_INDEX_NONE,
+    };
+    use borsh::to_vec;
+    use solana_program::program_error::ProgramError;
+
+    fn table(number_of_players: u8, draw_status: u8) -> RussianRouletteGame {
+        RussianRouletteGame {
+            table_id: 1,
+            round_id: 12,
+            draw_status,
+            number_of_players,
+            stake: 500_000_000,
+            program_fee: 10_000_000,
+            seat_1: [0; 32],
+            seat_2: [0; 32],
+            seat_3: [0; 32],
+            seat_4: [0; 32],
+            seat_5: [0; 32],
+            seat_6: [0; 32],
+            unlucky_player_index: UNLUCKY_PLAYER_INDEX_NONE,
+            vrf_seed: [0; 32],
+            unlucky_player: [0; 32],
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    enum RouletteAdminUpdate {
+        Fee(UpdateRussianRouletteParticipationFee),
+        Table(UpdateRussianRouletteTable),
+    }
+
+    fn run_admin_update(
+        initial_table: RussianRouletteGame,
+        update: RouletteAdminUpdate,
+        is_admin: bool,
+        is_signer: bool,
+        valid_table_address: bool,
+    ) -> (Result<(), ProgramError>, RussianRouletteGame) {
+        let program_id = Pubkey::new_unique();
+        let admin_key = Pubkey::new_unique();
+        let configured_admin = if is_admin {
+            admin_key
+        } else {
+            Pubkey::new_unique()
+        };
+        let table_id = [initial_table.table_id];
+        let derived_table =
+            Pubkey::find_program_address(&[RUSSIAN_ROULETTE_SEED, &table_id], &program_id).0;
+        let table_key = if valid_table_address {
+            derived_table
+        } else {
+            Pubkey::new_unique()
+        };
+        let config_key = Pubkey::new_unique();
+        let system_owner = system_program::ID;
+        let config = Config {
+            is_init: 1,
+            admin_1: configured_admin.to_bytes(),
+            admin_2: [0; 32],
+            admin_3: [0; 32],
+            admin_4: [0; 32],
+            admin_5: [0; 32],
+        };
+        let mut admin_lamports = 0;
+        let mut table_lamports = 1;
+        let mut config_lamports = 1;
+        let mut admin_data = [];
+        let mut table_data = to_vec(&initial_table).unwrap();
+        let mut config_data = to_vec(&config).unwrap();
+
+        let result = {
+            let admin_account = AccountInfo::new(
+                &admin_key,
+                is_signer,
+                true,
+                &mut admin_lamports,
+                &mut admin_data,
+                &system_owner,
+                false,
+            );
+            let table_account = AccountInfo::new(
+                &table_key,
+                false,
+                true,
+                &mut table_lamports,
+                &mut table_data,
+                &program_id,
+                false,
+            );
+            let config_account = AccountInfo::new(
+                &config_key,
+                false,
+                false,
+                &mut config_lamports,
+                &mut config_data,
+                &program_id,
+                false,
+            );
+
+            let accounts = [admin_account, table_account, config_account];
+            match update {
+                RouletteAdminUpdate::Fee(update) => {
+                    Admin::set_russian_roulette_participation_fee(&accounts, &program_id, update)
+                }
+                RouletteAdminUpdate::Table(update) => {
+                    Admin::set_russian_roulette_table(&accounts, &program_id, update)
+                }
+            }
+        };
+        let updated_table = RussianRouletteGame::try_from_slice(&table_data).unwrap();
+
+        (result, updated_table)
+    }
+
+    fn run_fee_update(
+        initial_table: RussianRouletteGame,
+        update: UpdateRussianRouletteParticipationFee,
+        is_admin: bool,
+        is_signer: bool,
+        valid_table_address: bool,
+    ) -> (Result<(), ProgramError>, RussianRouletteGame) {
+        run_admin_update(
+            initial_table,
+            RouletteAdminUpdate::Fee(update),
+            is_admin,
+            is_signer,
+            valid_table_address,
+        )
+    }
+
+    fn run_table_update(
+        initial_table: RussianRouletteGame,
+        update: UpdateRussianRouletteTable,
+    ) -> (Result<(), ProgramError>, RussianRouletteGame) {
+        run_admin_update(
+            initial_table,
+            RouletteAdminUpdate::Table(update),
+            true,
+            true,
+            true,
+        )
+    }
+
+    #[test]
+    fn admin_updates_fee_on_an_empty_open_table_and_advances_round() {
+        let (result, updated) = run_fee_update(
+            table(0, RUSSIAN_ROULETTE_STATUS_OPEN),
+            UpdateRussianRouletteParticipationFee {
+                expected_round_id: 12,
+                program_fee: 25_000_000,
+            },
+            true,
+            true,
+            true,
+        );
+
+        result.unwrap();
+        assert_eq!(updated.stake, 500_000_000);
+        assert_eq!(updated.program_fee, 25_000_000);
+        assert_eq!(updated.round_id, 13);
+    }
+
+    #[test]
+    fn unchanged_fee_is_idempotent_and_does_not_advance_round() {
+        let (result, updated) = run_fee_update(
+            table(0, RUSSIAN_ROULETTE_STATUS_OPEN),
+            UpdateRussianRouletteParticipationFee {
+                expected_round_id: 12,
+                program_fee: 10_000_000,
+            },
+            true,
+            true,
+            true,
+        );
+
+        result.unwrap();
+        assert_eq!(updated.round_id, 12);
+    }
+
+    #[test]
+    fn legacy_table_setter_cannot_change_the_fee_or_bypass_the_round_bump() {
+        let (mismatch_result, unchanged) = run_table_update(
+            table(0, RUSSIAN_ROULETTE_STATUS_OPEN),
+            UpdateRussianRouletteTable {
+                stake: 750_000_000,
+                program_fee: 25_000_000,
+            },
+        );
+        assert_eq!(
+            mismatch_result.unwrap_err(),
+            ProgramError::from(InvalidRussianRouletteConfiguration)
+        );
+        assert_eq!(unchanged.stake, 500_000_000);
+        assert_eq!(unchanged.program_fee, 10_000_000);
+        assert_eq!(unchanged.round_id, 12);
+
+        let (update_result, updated) = run_table_update(
+            table(0, RUSSIAN_ROULETTE_STATUS_OPEN),
+            UpdateRussianRouletteTable {
+                stake: 750_000_000,
+                program_fee: 10_000_000,
+            },
+        );
+        update_result.unwrap();
+        assert_eq!(updated.stake, 750_000_000);
+        assert_eq!(updated.program_fee, 10_000_000);
+        assert_eq!(updated.round_id, 13);
+    }
+
+    #[test]
+    fn fee_update_rejects_stale_active_and_pending_tables() {
+        for initial_table in [
+            table(0, RUSSIAN_ROULETTE_STATUS_OPEN),
+            table(1, RUSSIAN_ROULETTE_STATUS_OPEN),
+            table(6, RUSSIAN_ROULETTE_STATUS_PENDING),
+            table(6, RUSSIAN_ROULETTE_STATUS_DRAWN),
+        ] {
+            let expected_round_id = if initial_table.number_of_players == 0 {
+                11
+            } else {
+                12
+            };
+            let (result, _) = run_fee_update(
+                initial_table,
+                UpdateRussianRouletteParticipationFee {
+                    expected_round_id,
+                    program_fee: 25_000_000,
+                },
+                true,
+                true,
+                true,
+            );
+
+            assert_eq!(result.unwrap_err(), ProgramError::from(InvalidGameState));
+        }
+    }
+
+    #[test]
+    fn fee_update_requires_an_authorized_signer_and_exact_table_pda() {
+        let cases = [
+            (
+                false,
+                true,
+                true,
+                ProgramError::from(crate::error::RPSProgramError::InvalidAuth),
+            ),
+            (
+                true,
+                false,
+                true,
+                ProgramError::from(crate::error::RPSProgramError::NotSignerAuth),
+            ),
+            (true, true, false, ProgramError::from(InvalidGameAccount)),
+        ];
+
+        for (is_admin, is_signer, valid_table_address, expected_error) in cases {
+            let (result, _) = run_fee_update(
+                table(0, RUSSIAN_ROULETTE_STATUS_OPEN),
+                UpdateRussianRouletteParticipationFee {
+                    expected_round_id: 12,
+                    program_fee: 25_000_000,
+                },
+                is_admin,
+                is_signer,
+                valid_table_address,
+            );
+
+            assert_eq!(result.unwrap_err(), expected_error);
+        }
+    }
+
+    #[test]
+    fn roulette_fee_validation_allows_zero_and_rejects_stake_or_overflowing_fees() {
+        assert!(
+            Admin::validate_russian_roulette_table(UpdateRussianRouletteTable {
+                stake: 500_000_000,
+                program_fee: 0,
+            })
+            .is_ok()
+        );
+        assert!(
+            Admin::validate_russian_roulette_table(UpdateRussianRouletteTable {
+                stake: 500_000_000,
+                program_fee: 499_999_999,
+            })
+            .is_ok()
+        );
+
+        for program_fee in [500_000_000, u64::MAX] {
+            assert_eq!(
+                Admin::validate_russian_roulette_table(UpdateRussianRouletteTable {
+                    stake: 500_000_000,
+                    program_fee,
+                })
+                .unwrap_err(),
+                ProgramError::from(InvalidRussianRouletteConfiguration)
+            );
+        }
+
+        assert_eq!(
+            Admin::validate_russian_roulette_table(UpdateRussianRouletteTable {
+                stake: u64::MAX / 4,
+                program_fee: 1,
+            })
+            .unwrap_err(),
+            ProgramError::from(InvalidRussianRouletteConfiguration)
+        );
     }
 }

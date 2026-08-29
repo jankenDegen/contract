@@ -141,6 +141,12 @@ pub struct UpdateRussianRouletteTable {
 }
 
 #[derive(BorshSerialize, BorshDeserialize, Debug, Clone, PartialEq, Copy)]
+pub struct UpdateRussianRouletteParticipationFee {
+    pub expected_round_id: u64,
+    pub program_fee: u64,
+}
+
+#[derive(BorshSerialize, BorshDeserialize, Debug, Clone, PartialEq, Copy)]
 pub struct InitRussianRoulette {
     pub table_id: u8,
     pub seat: u8,

@@ -3,7 +3,7 @@ use crate::{
     state::{
         Buy, DiceManager, InitDice, InitGame, InitRussianRoulette, InitRussianRouletteTable,
         JoinDice, JoinGame, JoinRussianRoulette, Manager, RaffleManager, Reveal,
-        UpdateRussianRouletteTable,
+        UpdateRussianRouletteParticipationFee, UpdateRussianRouletteTable,
     },
 };
 use borsh::BorshDeserialize;
@@ -53,7 +53,11 @@ pub enum RPSProgramInstruction {
     },
     RequestDiceDraw,
     FinalizeDiceDraw,
+    LegacyDiceVrfCallback {
+        randomness: [u8; 32],
+    },
     DiceVrfCallback {
+        expected_vrf_seed: [u8; 32],
         randomness: [u8; 32],
     },
     CloseDiceGame,
@@ -76,6 +80,8 @@ pub enum RPSProgramInstruction {
         expected_round_id: u64,
     },
     RussianRouletteVrfCallback {
+        expected_round_id: u64,
+        expected_vrf_seed: [u8; 32],
         randomness: [u8; 32],
     },
     CloseRussianRouletteGame,
@@ -84,6 +90,9 @@ pub enum RPSProgramInstruction {
     },
     RetryRussianRouletteDraw {
         expected_round_id: u64,
+    },
+    SetRussianRouletteParticipationFee {
+        update: UpdateRussianRouletteParticipationFee,
     },
 }
 
@@ -157,28 +166,77 @@ impl RPSProgramInstruction {
             33 => Self::RetryRussianRouletteDraw {
                 expected_round_id: u64::try_from_slice(rest)?,
             },
+            34 => Self::SetRussianRouletteParticipationFee {
+                update: UpdateRussianRouletteParticipationFee::try_from_slice(rest)?,
+            },
             90 => Self::RaffleVrfCallback {
                 randomness: Self::unpack_randomness(rest)?,
             },
-            91 => Self::DiceVrfCallback {
-                randomness: Self::unpack_randomness(rest)?,
+            91 => match rest.len() {
+                32 => Self::LegacyDiceVrfCallback {
+                    randomness: Self::unpack_randomness(rest)?,
+                },
+                64 => {
+                    let (expected_vrf_seed, randomness) = Self::unpack_seeded_randomness(rest)?;
+                    Self::DiceVrfCallback {
+                        expected_vrf_seed,
+                        randomness,
+                    }
+                }
+                _ => return Err(InvalidInstruction.into()),
             },
-            92 => Self::RussianRouletteVrfCallback {
-                randomness: Self::unpack_randomness(rest)?,
-            },
+            92 => {
+                let (expected_round_id, expected_vrf_seed, randomness) =
+                    Self::unpack_roulette_randomness(rest)?;
+                Self::RussianRouletteVrfCallback {
+                    expected_round_id,
+                    expected_vrf_seed,
+                    randomness,
+                }
+            }
 
             _ => return Err(InvalidInstruction.into()),
         })
     }
 
     fn unpack_randomness(input: &[u8]) -> Result<[u8; 32], ProgramError> {
-        if input.len() < 32 {
+        if input.len() != 32 {
+            return Err(InvalidInstruction.into());
+        }
+
+        let mut randomness = [0u8; 32];
+        randomness.copy_from_slice(input);
+        Ok(randomness)
+    }
+
+    fn unpack_seeded_randomness(input: &[u8]) -> Result<([u8; 32], [u8; 32]), ProgramError> {
+        if input.len() != 64 {
             return Err(InvalidInstruction.into());
         }
 
         let mut randomness = [0u8; 32];
         randomness.copy_from_slice(&input[..32]);
-        Ok(randomness)
+        let mut expected_vrf_seed = [0u8; 32];
+        expected_vrf_seed.copy_from_slice(&input[32..]);
+        Ok((expected_vrf_seed, randomness))
+    }
+
+    fn unpack_roulette_randomness(input: &[u8]) -> Result<(u64, [u8; 32], [u8; 32]), ProgramError> {
+        if input.len() != 72 {
+            return Err(InvalidInstruction.into());
+        }
+
+        let mut randomness = [0u8; 32];
+        randomness.copy_from_slice(&input[..32]);
+        let mut round_id_bytes = [0u8; 8];
+        round_id_bytes.copy_from_slice(&input[32..40]);
+        let mut expected_vrf_seed = [0u8; 32];
+        expected_vrf_seed.copy_from_slice(&input[40..]);
+        Ok((
+            u64::from_le_bytes(round_id_bytes),
+            expected_vrf_seed,
+            randomness,
+        ))
     }
 }
 
@@ -231,6 +289,24 @@ mod tests {
     }
 
     #[test]
+    fn roulette_participation_fee_instruction_decodes_expected_round_and_fee() {
+        let update = UpdateRussianRouletteParticipationFee {
+            expected_round_id: 74,
+            program_fee: 25_000_000,
+        };
+        let mut data = vec![34];
+        update.serialize(&mut data).unwrap();
+
+        assert_eq!(
+            RPSProgramInstruction::unpack(&data).unwrap(),
+            RPSProgramInstruction::SetRussianRouletteParticipationFee { update }
+        );
+        assert!(RPSProgramInstruction::unpack(&data[..data.len() - 1]).is_err());
+        data.push(0);
+        assert!(RPSProgramInstruction::unpack(&data).is_err());
+    }
+
+    #[test]
     fn roulette_seat_instructions_require_and_decode_the_expected_round() {
         let round_id = 73;
         let init = InitRussianRoulette {
@@ -257,5 +333,73 @@ mod tests {
         );
         assert!(RPSProgramInstruction::unpack(&[27, 2, 4]).is_err());
         assert!(RPSProgramInstruction::unpack(&[28, 5]).is_err());
+    }
+
+    #[test]
+    fn dice_vrf_callback_requires_the_exact_request_seed() {
+        let expected_vrf_seed = [7u8; 32];
+        let randomness = [9u8; 32];
+        let mut data = vec![91];
+        data.extend_from_slice(&randomness);
+        data.extend_from_slice(&expected_vrf_seed);
+
+        assert_eq!(
+            RPSProgramInstruction::unpack(&data).unwrap(),
+            RPSProgramInstruction::DiceVrfCallback {
+                expected_vrf_seed,
+                randomness,
+            }
+        );
+        assert!(RPSProgramInstruction::unpack(&data[..data.len() - 1]).is_err());
+        data.push(0);
+        assert!(RPSProgramInstruction::unpack(&data).is_err());
+
+        let mut legacy_data = vec![91];
+        legacy_data.extend_from_slice(&randomness);
+        assert_eq!(
+            RPSProgramInstruction::unpack(&legacy_data).unwrap(),
+            RPSProgramInstruction::LegacyDiceVrfCallback { randomness }
+        );
+    }
+
+    #[test]
+    fn roulette_vrf_callback_requires_the_exact_round_and_request_seed() {
+        let expected_round_id: u64 = 91;
+        let expected_vrf_seed = [11u8; 32];
+        let randomness = [13u8; 32];
+        let mut data = vec![92];
+        data.extend_from_slice(&randomness);
+        data.extend_from_slice(&expected_round_id.to_le_bytes());
+        data.extend_from_slice(&expected_vrf_seed);
+
+        assert_eq!(
+            RPSProgramInstruction::unpack(&data).unwrap(),
+            RPSProgramInstruction::RussianRouletteVrfCallback {
+                expected_round_id,
+                expected_vrf_seed,
+                randomness,
+            }
+        );
+        assert!(RPSProgramInstruction::unpack(&data[..data.len() - 1]).is_err());
+        data.push(0);
+        assert!(RPSProgramInstruction::unpack(&data).is_err());
+
+        let mut legacy_data = vec![92];
+        legacy_data.extend_from_slice(&randomness);
+        assert!(RPSProgramInstruction::unpack(&legacy_data).is_err());
+    }
+
+    #[test]
+    fn raffle_vrf_callback_rejects_trailing_bytes() {
+        let randomness = [17u8; 32];
+        let mut data = vec![90];
+        data.extend_from_slice(&randomness);
+        assert_eq!(
+            RPSProgramInstruction::unpack(&data).unwrap(),
+            RPSProgramInstruction::RaffleVrfCallback { randomness }
+        );
+
+        data.push(0);
+        assert!(RPSProgramInstruction::unpack(&data).is_err());
     }
 }

@@ -60,9 +60,13 @@ impl Processor {
             }
             RPSProgramInstruction::RequestDiceDraw => Dice::request_draw(accounts, program_id),
             RPSProgramInstruction::FinalizeDiceDraw => Dice::finalize_draw(accounts, program_id),
-            RPSProgramInstruction::DiceVrfCallback { randomness } => {
-                Dice::consume_vrf_randomness(accounts, program_id, randomness)
+            RPSProgramInstruction::LegacyDiceVrfCallback { randomness } => {
+                Dice::consume_legacy_vrf_randomness(accounts, program_id, randomness)
             }
+            RPSProgramInstruction::DiceVrfCallback {
+                expected_vrf_seed,
+                randomness,
+            } => Dice::consume_vrf_randomness(accounts, program_id, expected_vrf_seed, randomness),
             RPSProgramInstruction::CloseDiceGame => Admin::close_dice_game(accounts, program_id),
             RPSProgramInstruction::SetRussianRouletteTable { new_table } => {
                 Admin::set_russian_roulette_table(accounts, program_id, new_table)
@@ -82,9 +86,17 @@ impl Processor {
             RPSProgramInstruction::FinalizeRussianRouletteDraw { expected_round_id } => {
                 RussianRoulette::finalize_draw(accounts, program_id, expected_round_id)
             }
-            RPSProgramInstruction::RussianRouletteVrfCallback { randomness } => {
-                RussianRoulette::consume_vrf_randomness(accounts, program_id, randomness)
-            }
+            RPSProgramInstruction::RussianRouletteVrfCallback {
+                expected_round_id,
+                expected_vrf_seed,
+                randomness,
+            } => RussianRoulette::consume_vrf_randomness(
+                accounts,
+                program_id,
+                expected_round_id,
+                expected_vrf_seed,
+                randomness,
+            ),
             RPSProgramInstruction::CloseRussianRouletteGame => {
                 Admin::close_russian_roulette_game(accounts, program_id)
             }
@@ -93,6 +105,9 @@ impl Processor {
             }
             RPSProgramInstruction::RetryRussianRouletteDraw { expected_round_id } => {
                 RussianRoulette::retry_draw(accounts, program_id, expected_round_id)
+            }
+            RPSProgramInstruction::SetRussianRouletteParticipationFee { update } => {
+                Admin::set_russian_roulette_participation_fee(accounts, program_id, update)
             }
         }
     }
