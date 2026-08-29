@@ -93,8 +93,8 @@ program ID supplied by the Solana runtime.
 ## Instruction Encoding
 
 Instruction data starts with a one-byte tag. Any remaining bytes are the Borsh
-encoding of the listed payload. VRF callbacks are the exception: their payload
-is a raw 32-byte randomness value immediately after the tag.
+encoding of the listed payload. VRF callback payloads are fixed-width values
+whose randomness is appended by the VRF program.
 
 | Tag | Variant | Payload |
 | ---: | --- | --- |
@@ -129,9 +129,10 @@ is a raw 32-byte randomness value immediately after the tag.
 | 31 | `CloseRussianRouletteGame` | None |
 | 32 | `ResetRussianRouletteTable` | `u64` expected round ID |
 | 33 | `RetryRussianRouletteDraw` | `u64` expected round ID |
+| 34 | `SetRussianRouletteParticipationFee` | `UpdateRussianRouletteParticipationFee` |
 | 90 | `RaffleVrfCallback` | Raw `[u8; 32]` randomness |
-| 91 | `DiceVrfCallback` | Raw `[u8; 32]` randomness |
-| 92 | `RussianRouletteVrfCallback` | Raw `[u8; 32]` randomness |
+| 91 | `DiceVrfCallback` | `[u8; 32]` randomness, then `[u8; 32]` request seed; a narrowly gated raw-randomness legacy form remains for requests made before this upgrade |
+| 92 | `RussianRouletteVrfCallback` | `[u8; 32]` randomness, then `u64` round ID and `[u8; 32]` request seed |
 
 Tags `3`, `5`, and `6` are currently unused.
 
@@ -199,6 +200,7 @@ signers must be marked as signers in the instruction metas.
 | `SetDiceManager` | admin, dice manager, config |
 | `InitDiceManager` | admin, dice manager, config, system program |
 | `SetRussianRouletteTable` | admin, roulette table, config |
+| `SetRussianRouletteParticipationFee` | admin, roulette table, config |
 | `InitRussianRouletteTable` | admin, roulette table, config, system program |
 | `CloseRaffle` | admin, raffle, config |
 | `CloseDiceGame` | admin, dice game, config |
@@ -241,7 +243,7 @@ signers must be marked as signers in the instruction metas.
 | `CreateRussianRouletteGame` | player, roulette table, system program |
 | `JoinRussianRouletteGame` | player, roulette table, system program |
 | `RequestRussianRouletteDraw` | payer, table, VRF request identity, oracle queue, system program, slot hashes sysvar, VRF program, fee manager, seats 1 through 6 |
-| `RetryRussianRouletteDraw` | payer, table, VRF request identity, oracle queue, system program, slot hashes sysvar, VRF program, fee manager, seats 1 through 6 |
+| `RetryRussianRouletteDraw` | admin payer, table, VRF request identity, oracle queue, system program, slot hashes sysvar, VRF program, fee manager, seats 1 through 6, config |
 | `RussianRouletteVrfCallback` | VRF callback identity, table |
 | `FinalizeRussianRouletteDraw` | table, fee manager, seats 1 through 6 |
 | `ResetRussianRouletteTable` | admin, table, config |
@@ -315,14 +317,18 @@ Roulette uses three persistent table accounts with IDs `0..2`. Each table has
 six numbered seats and a monotonically increasing round ID. Seat and lifecycle
 instructions include the expected round ID to reject stale transactions.
 
-Each player pays the table stake plus a fixed `10,000,000` lamport participation
-fee. When all seats are occupied, VRF selects one losing seat. The losing stake
-is split across the five survivors. Participation fees and any division
+Each player pays the table stake plus that table's participation fee, which
+defaults to `10,000,000` lamports. An admin can update the fee only while the
+table is open and empty, using the expected round ID; a change advances the
+round ID. When all seats are occupied, VRF selects one losing seat. The losing
+stake is split across the five survivors. Participation fees and any division
 remainder are moved to the fee manager.
 
 After settlement, an admin resets the table. Resetting increments the round ID,
-clears all seats, and reopens the table. A pending request that has not received
-randomness can be submitted again with `RetryRussianRouletteDraw`.
+clears all seats, preserves the configured participation fee, and reopens the
+table. A configured admin can resubmit a pending randomness request with
+`RetryRussianRouletteDraw`; retry attempts retain one stable callback identity
+for the round so an older valid response cannot be invalidated by a newer retry.
 
 The constants module provides these table stake presets:
 
@@ -332,8 +338,8 @@ The constants module provides these table stake presets:
 | Prime | 500,000,000 lamports |
 | Apex | 1,000,000,000 lamports |
 
-Table initialization enforces a nonzero stake and the fixed participation fee;
-the caller chooses which preset value to assign to each table.
+Table initialization enforces a nonzero stake and a participation fee below the
+stake; the caller chooses which preset value to assign to each table.
 
 ## MagicBlock VRF
 
@@ -344,10 +350,13 @@ program:
 Vrf1RNUjXmQGjmQrQLvJHs9SNkvDJEsRVFPkfSQUwGz
 ```
 
-Requests accept either the default queue or the default ephemeral queue. Each
-game records a deterministic request seed and enters the pending state before
-settlement. Callback instructions can only be invoked by the signer identity
-PDA derived under the VRF program for this program ID.
+Requests accept either the default queue or the default ephemeral queue. Dice
+and roulette bind authenticated callback arguments to the active request seed;
+roulette also binds the round ID. The VRF program emits the one-byte callback
+tag, the randomness, and then those arguments. Their initial request seeds
+include the request slot, and both handlers validate the exact game PDA before
+accepting randomness. Callback instructions can only be invoked by the signer
+identity PDA derived under the VRF program for this program ID.
 
 A plain `solana-test-validator` does not provide the MagicBlock VRF program.
 VRF-dependent integration tests need that program deployed or a compatible
