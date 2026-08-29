@@ -7,6 +7,11 @@ edition = "2021"
 name = "jankendegen"
 crate-type = ["cdylib"]
 
+# Pin the Solana CLI image used by solana-verify. The program depends on
+# solana-system-interface 3.2+, which requires the newer SBF Rust toolchain.
+[workspace.metadata.cli]
+solana = "4.0.3"
+
 [features]
 default = []
 no-entrypoint = []
@@ -14,6 +19,7 @@ no-entrypoint = []
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = [
   'cfg(target_os, values("solana"))',
+  'cfg(target_feature, values("static-syscalls"))',
   'cfg(feature, values("custom-heap", "custom-panic"))',
 ] }
 
