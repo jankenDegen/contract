@@ -13,7 +13,8 @@ pub mod russian_roulette;
 pub mod state;
 pub mod utils;
 
-#[cfg(target_os = "solana")]
+// SBPFv3's standard library already exports `abort`; older SBPF targets do not.
+#[cfg(all(target_os = "solana", not(target_feature = "static-syscalls")))]
 #[no_mangle]
 pub extern "C" fn abort() -> ! {
     loop {}
