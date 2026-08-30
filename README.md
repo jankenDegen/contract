@@ -13,10 +13,11 @@ directly on `solana-program` and does not use Anchor.
 
 ## Toolchain
 
-- Rust `1.92.0`, pinned in `rust-toolchain.toml`
-- Solana/Agave CLI with `cargo build-sbf`
+- Solana/Agave CLI `4.0.3`, pinned for `solana-verify` in
+  `[workspace.metadata.cli]` in `Cargo.toml`
+- The SBF Rust toolchain supplied by that Solana CLI
 - `solana-program` `3.0.0`
-- Borsh `1.5.1`
+- Borsh requirement `1.5.1` (resolved to `1.8.1` by `Cargo.lock`)
 
 Install the Solana CLI before building the SBF program. Confirm the active
 tools with:
@@ -51,6 +52,32 @@ target/deploy/jankendegen.so
 
 The crate supports a `no-entrypoint` feature for consumers that need the
 program as a dependency without exporting its Solana entrypoint.
+
+## Verifiable Build
+
+Install Docker and the Solana Verify CLI, then run the deterministic build from
+the repository root:
+
+```bash
+cargo install solana-verify --locked
+solana-verify build
+solana-verify get-executable-hash target/deploy/jankendegen.so
+```
+
+`solana-verify` reads the Solana CLI `4.0.3` pin from `Cargo.toml` and selects
+the corresponding digest-pinned build image. After the exact source revision
+has been pushed and its ELF deployed, upload the verification record from the
+official repository:
+
+```bash
+solana-verify verify-from-repo \
+  -u mainnet-beta \
+  --program-id Degens1tGHNhGYcMGNjTj4fMP32zrwcyeJ8ti28sfScJ \
+  https://github.com/jankenDegen/contract
+```
+
+The repository build, deployed program, and verification record must all refer
+to the same commit and ELF hash.
 
 ## Deploy
 
@@ -130,8 +157,16 @@ whose randomness is appended by the VRF program.
 | 32 | `ResetRussianRouletteTable` | `u64` expected round ID |
 | 33 | `RetryRussianRouletteDraw` | `u64` expected round ID |
 | 34 | `SetRussianRouletteParticipationFee` | `UpdateRussianRouletteParticipationFee` |
-| 90 | `RaffleVrfCallback` | Raw `[u8; 32]` randomness |
-| 91 | `DiceVrfCallback` | `[u8; 32]` randomness, then `[u8; 32]` request seed; a narrowly gated raw-randomness legacy form remains for requests made before this upgrade |
+| 35 | `RetryRaffleDraw` | None |
+| 36 | `MarkRaffleVrfFailed` | None |
+| 37 | `RefundFailedRaffleTicket` | None |
+| 38 | `RetryDiceDraw` | None |
+| 39 | `MarkDiceVrfFailed` | None |
+| 40 | `RefundFailedDiceGame` | None |
+| 41 | `MarkRussianRouletteVrfFailed` | `u64` expected round ID |
+| 42 | `RefundFailedRussianRouletteRound` | `u64` expected round ID |
+| 90 | `RaffleVrfCallback` | Exactly `[u8; 32]` randomness, then `[u8; 32]` request seed |
+| 91 | `DiceVrfCallback` | Exactly `[u8; 32]` randomness, then `[u8; 32]` request seed |
 | 92 | `RussianRouletteVrfCallback` | `[u8; 32]` randomness, then `u64` round ID and `[u8; 32]` request seed |
 
 Tags `3`, `5`, and `6` are currently unused.
@@ -147,10 +182,10 @@ Integer seed components use little-endian byte order.
 | Raffle manager | `[b"rafflemanager"]` | 45 bytes |
 | Dice manager | `[b"dicemanager"]` | 17 bytes |
 | Janken game | `[b"game", commitment_hash]` | 124 bytes |
-| Raffle | `[b"raffle", raffle_no_le]` | 179 bytes |
+| Raffle | `[b"raffle", raffle_no_le]` | 188 bytes (legacy: 179) |
 | Ticket | `[b"ticket", ticket_no, b"raffle", raffle_no_le]` | 69 bytes |
-| Dice game | `[b"dice", game_id_le]` | 281 bytes |
-| Roulette table | `[b"russianroulette", table_id]` | 284 bytes |
+| Dice game | `[b"dice", game_id_le]` | 298 bytes (legacy: 281) |
+| Roulette table | `[b"russianroulette", table_id]` | 301 bytes (legacy: 284) |
 
 ## Account State
 
@@ -163,11 +198,11 @@ discriminator.
 | `Manager` | Janken timing, basis-point fee, minimum stake, collected fees |
 | `Game` | Janken commitment, players, stake, deadline, and decisions |
 | `RaffleManager` | Raffle number and payout configuration |
-| `RaffleState` | Ticket bitmap, pricing, prizes, draw state, and VRF value |
+| `RaffleState` | Ticket bitmap, pricing, prizes, draw state, VRF value, and retry metadata |
 | `Ticket` | Ticket number, raffle number, beneficiary, and rent payer |
 | `DiceManager` | Minimum stake per face and fixed program fee |
-| `DiceGame` | Face ownership, players, draw state, VRF value, and winner |
-| `RussianRouletteGame` | Persistent table configuration, round, seats, and result |
+| `DiceGame` | Face ownership, players, snapshotted fee, draw state, VRF value, winner, and retry metadata |
+| `RussianRouletteGame` | Persistent table configuration, round, seats, result, retry metadata, and settlement time |
 
 Raffle, dice, and roulette draw statuses use:
 
@@ -176,6 +211,22 @@ Raffle, dice, and roulette draw statuses use:
 | 0 | Open |
 | 1 | VRF pending |
 | 2 | Drawn |
+| 3 | VRF failed |
+
+The V2 layouts preserve every V1 byte and append little-endian fields:
+
+| Account | Appended V2 fields and offsets |
+| --- | --- |
+| Raffle | `vrf_last_request_at: i64` at 179; `vrf_retry_count: u8` at 187 |
+| Dice | `program_fee: u64` at 281; `vrf_last_request_at: i64` at 289; `vrf_retry_count: u8` at 297 |
+| Roulette | `vrf_last_request_at: i64` at 284; `vrf_retry_count: u8` at 292; `settled_at: i64` at 293 |
+
+Existing 179-byte raffles and 284-byte roulette tables are decoded as V1 and
+are expanded lazily when a payer next buys/joins or requests/retries VRF. The
+rent top-up calculation preserves all ticket or seat escrow. New dice games
+use the 298-byte V2 layout; legacy 281-byte drawn dice accounts remain
+decodable for permissionless rent recovery, but active legacy dice games are
+not migrated.
 
 Janken game state uses `1` for waiting for a guest and `2` for waiting for the
 initializer's reveal.
@@ -203,7 +254,7 @@ signers must be marked as signers in the instruction metas.
 | `SetRussianRouletteParticipationFee` | admin, roulette table, config |
 | `InitRussianRouletteTable` | admin, roulette table, config, system program |
 | `CloseRaffle` | admin, raffle, config |
-| `CloseDiceGame` | admin, dice game, config |
+| `CloseDiceGame` | initializer, dice game |
 | `CloseRussianRouletteGame` | admin, roulette table, config |
 
 ### Janken
@@ -222,9 +273,12 @@ signers must be marked as signers in the instruction metas.
 | `CreateRaffle` | admin, raffle, raffle manager, config, system program |
 | `BuyTicket` | payer, player, ticket, raffle, system program |
 | `RequestRaffleDraw` | payer, raffle, VRF request identity, oracle queue, system program, slot hashes sysvar, VRF program |
+| `RetryRaffleDraw` | payer, raffle, VRF request identity, oracle queue, system program, slot hashes sysvar, VRF program |
+| `MarkRaffleVrfFailed` | raffle |
 | `RaffleVrfCallback` | VRF callback identity, raffle |
 | `FinalizeRaffleDraw` | raffle, fee manager, winning ticket |
 | `ClaimPrize` | payer, player, ticket, raffle |
+| `RefundFailedRaffleTicket` | payer, player, ticket, raffle |
 
 ### Dice
 
@@ -233,8 +287,11 @@ signers must be marked as signers in the instruction metas.
 | `CreateDiceGame` | player, dice game, dice manager, system program |
 | `JoinDiceGame` | player, dice game, system program |
 | `RequestDiceDraw` | payer, dice game, VRF request identity, oracle queue, system program, slot hashes sysvar, VRF program |
+| `RetryDiceDraw` | payer, dice game, VRF request identity, oracle queue, system program, slot hashes sysvar, VRF program |
+| `MarkDiceVrfFailed` | dice game |
 | `DiceVrfCallback` | VRF callback identity, dice game |
-| `FinalizeDiceDraw` | dice game, dice manager, fee manager, face 1 player, face 2 player, face 3 player, face 4 player, face 5 player, face 6 player |
+| `FinalizeDiceDraw` | dice game, fee manager, face 1 player, face 2 player, face 3 player, face 4 player, face 5 player, face 6 player |
+| `RefundFailedDiceGame` | dice game, face 1/initializer, face 2 player, face 3 player, face 4 player, face 5 player, face 6 player |
 
 ### Russian Roulette
 
@@ -243,10 +300,12 @@ signers must be marked as signers in the instruction metas.
 | `CreateRussianRouletteGame` | player, roulette table, system program |
 | `JoinRussianRouletteGame` | player, roulette table, system program |
 | `RequestRussianRouletteDraw` | payer, table, VRF request identity, oracle queue, system program, slot hashes sysvar, VRF program, fee manager, seats 1 through 6 |
-| `RetryRussianRouletteDraw` | admin payer, table, VRF request identity, oracle queue, system program, slot hashes sysvar, VRF program, fee manager, seats 1 through 6, config |
+| `RetryRussianRouletteDraw` | payer, table, VRF request identity, oracle queue, system program, slot hashes sysvar, VRF program |
+| `MarkRussianRouletteVrfFailed` | table |
 | `RussianRouletteVrfCallback` | VRF callback identity, table |
 | `FinalizeRussianRouletteDraw` | table, fee manager, seats 1 through 6 |
-| `ResetRussianRouletteTable` | admin, table, config |
+| `RefundFailedRussianRouletteRound` | table, fee manager, seats 1 through 6 |
+| `ResetRussianRouletteTable` | table |
 
 ## Game Rules
 
@@ -288,7 +347,12 @@ the draw, every ticket is claimed individually:
 
 Claiming closes the ticket account and returns its rent to the original payer.
 The raffle can be closed by an admin after all ticket accounts have been
-claimed.
+claimed. If VRF exhausts its retry lifecycle, each ticket is instead processed
+with `RefundFailedRaffleTicket`: the ticket price returns from raffle escrow to
+the stored beneficiary, the ticket account's rent returns to its stored payer,
+and the sold-ticket bitmap and count are cleared. No beneficiary or payer
+signature is required because both destinations are fixed in the ticket state.
+After all 100 refunds, an admin may close the failed raffle.
 
 Initial raffle settings are:
 
@@ -308,8 +372,16 @@ face. Duplicate and out-of-range selections are rejected.
 
 Once all six faces are assigned, VRF produces a winning face in `1..=6`. The
 owner of that face receives the six-stake pot minus the fixed dice program fee.
-The initial minimum stake is `10,000,000` lamports per face and the initial fee
-is `3,000,000` lamports.
+The fee is snapshotted into the game account when the game is created, so an
+administrative fee update cannot change settlement for an existing game. The
+initial minimum stake is `10,000,000` lamports per face and the initial fee is
+`3,000,000` lamports.
+
+If VRF fails, `RefundFailedDiceGame` atomically returns one stake for each of
+the six occupied face slots. A player who owns several faces receives one
+refund per face. The instruction then returns the game's rent and any dust to
+the stored initializer and closes the dice PDA. The six destination accounts
+are fixed by the stored face assignments; no player signature is required.
 
 ### Russian Roulette
 
@@ -324,11 +396,17 @@ round ID. When all seats are occupied, VRF selects one losing seat. The losing
 stake is split across the five survivors. Participation fees and any division
 remainder are moved to the fee manager.
 
-After settlement, an admin resets the table. Resetting increments the round ID,
-clears all seats, preserves the configured participation fee, and reopens the
-table. A configured admin can resubmit a pending randomness request with
-`RetryRussianRouletteDraw`; retry attempts retain one stable callback identity
-for the round so an older valid response cannot be invalidated by a newer retry.
+After settlement, anyone may reset the table once its result has remained
+available for 120 seconds. Resetting validates the exact table PDA and expected
+round, increments the round ID, clears all seats, preserves the configured
+participation fee, and reopens the table.
+
+If VRF fails, `RefundFailedRussianRouletteRound` atomically returns exactly one
+stake to every occupied seat. Participation fees are not refunded: all six are
+moved to the canonical fee manager and added to `collected_fee`, matching the
+normal fee policy. The same instruction clears the table, increments its round,
+and reopens it. All destination accounts are fixed by the stored seats and
+canonical manager PDA, so no player or admin signature is required.
 
 The constants module provides these table stake presets:
 
@@ -350,13 +428,40 @@ program:
 Vrf1RNUjXmQGjmQrQLvJHs9SNkvDJEsRVFPkfSQUwGz
 ```
 
-Requests accept either the default queue or the default ephemeral queue. Dice
-and roulette bind authenticated callback arguments to the active request seed;
-roulette also binds the round ID. The VRF program emits the one-byte callback
-tag, the randomness, and then those arguments. Their initial request seeds
-include the request slot, and both handlers validate the exact game PDA before
+Requests accept either the default queue or the default ephemeral queue.
+Raffle, dice, and roulette bind authenticated callback arguments to the stable
+request seed; roulette also binds the round ID. Tags 90 and 91 require exactly
+64 payload bytes after the tag, and tag 92 requires exactly 72. There is no
+unseeded legacy callback form. Initial request seeds include the game PDA and
+request slot, and every callback validates the canonical game PDA before
 accepting randomness. Callback instructions can only be invoked by the signer
 identity PDA derived under the VRF program for this program ID.
+
+### Retry And Failure Lifecycle
+
+Every VRF game follows the same permissionless recovery schedule. The payer of
+a request or retry must sign and pays that VRF request; it need not be an admin
+or player.
+
+| Earliest time from initial request | Allowed transition | Stored retry count |
+| ---: | --- | ---: |
+| 0 seconds | Initial VRF request | 0 |
+| 120 seconds | First retry | 1 |
+| 240 seconds | Second retry | 2 |
+| 360 seconds | Mark unresolved request `VRF failed` | 2 |
+
+Each retry uses a unique caller seed but keeps the original stable callback
+seed (and, for roulette, the original round ID). Therefore a valid response to
+any of the three requests can still complete the same draw. Retry and failure
+delays are measured from the preceding request timestamp, not from a client
+timer.
+
+Callbacks, failure markers, and retries all require the same unresolved pending
+state: pending status plus the game's undrawn result sentinel. If a callback
+lands first, failure marking is rejected because a result exists. If failure
+marking lands first, a late callback is rejected because the status is no
+longer pending. Solana's atomic transaction ordering makes the first confirmed
+transition authoritative; neither path can partially execute.
 
 A plain `solana-test-validator` does not provide the MagicBlock VRF program.
 VRF-dependent integration tests need that program deployed or a compatible
@@ -366,7 +471,9 @@ test double. Unit tests do not require a validator.
 
 The config account stores five administrator keys. Any one configured admin can
 change manager settings, initialize or update roulette tables, collect fees,
-and close eligible program accounts.
+and close eligible raffle or roulette accounts. VRF retries, failure markers,
+failed-game refunds, drawn-dice closure, and timed roulette reset are
+permissionless, with their destinations and PDAs enforced by on-chain state.
 
 Game fees accumulate as lamports in the fee manager PDA and as the
 `collected_fee` field in `Manager`. `CollectFee` transfers the recorded amount
@@ -419,16 +526,24 @@ The program returns `ProgramError::Custom(code)` using this zero-based mapping:
 | 36 | `RussianRouletteDrawPending` |
 | 37 | `InvalidRussianRouletteConfiguration` |
 | 38 | `InvalidPayer` |
+| 39 | `VrfRetryTooEarly` |
+| 40 | `VrfRetryLimitReached` |
+| 41 | `VrfFailureTooEarly` |
+| 42 | `VrfRetriesNotExhausted` |
 
 ## Tests
 
 The Rust unit tests currently cover:
 
-- Round-bound roulette instruction decoding
-- Rejection of missing roulette round IDs
-- Ticket account size consistency with its Borsh layout
-- Raffle winner selection from the sold-ticket bitmap
-- Rejection of inconsistent raffle ticket bitmaps
+- Exact instruction payloads, round/seed callback binding, and rejection of
+  unseeded callbacks
+- Exact 179/188, 281/298, and 284/301 V1/V2 Borsh layouts and zero-default
+  compatibility
+- Two 120-second retries followed by the final 120-second failure gate
+- Callback-versus-failure mutual exclusion for all three VRF games
+- Raffle winner selection and per-ticket failed-refund accounting
+- Dice duplicate-player face refunds plus account-rent recovery
+- Roulette normal settlement and failed-round stake/fee accounting and clear
 
 Run them with:
 
