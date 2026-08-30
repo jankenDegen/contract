@@ -167,7 +167,7 @@ impl Admin {
             table.stake = new_table.stake;
             table.round_id = table.round_id.checked_add(1).ok_or(ArithmeticError)?;
         }
-        table.serialize_compatible(&mut table_account.data.borrow_mut())?;
+        table.serialize(&mut &mut table_account.data.borrow_mut()[..])?;
 
         Ok(())
     }
@@ -203,7 +203,7 @@ impl Admin {
         let previous_fee = table.program_fee;
         table.program_fee = update.program_fee;
         table.round_id = table.round_id.checked_add(1).ok_or(ArithmeticError)?;
-        table.serialize_compatible(&mut table_account.data.borrow_mut())?;
+        table.serialize(&mut &mut table_account.data.borrow_mut()[..])?;
 
         msg!(
             "roulette_participation_fee_updated table_id={} round_id={} previous_fee_lamports={} program_fee_lamports={}",
@@ -254,7 +254,7 @@ impl Admin {
             return Err(InvalidRaffleAccount.into());
         }
 
-        let raffle = RaffleState::try_from_compatible_slice(&raffle_account.data.borrow())?;
+        let raffle = RaffleState::try_from_slice(&raffle_account.data.borrow())?;
         let expected_raffle = Pubkey::find_program_address(
             &[RAFFLE_SEED, &raffle.raffle_no.to_le_bytes()],
             program_id,
@@ -294,7 +294,7 @@ impl Admin {
             return Err(InvalidGameAccount.into());
         }
 
-        let dice = DiceGame::try_from_compatible_slice(&dice_account.data.borrow())?;
+        let dice = DiceGame::try_from_slice(&dice_account.data.borrow())?;
         let expected_dice =
             Pubkey::find_program_address(&[DICE_SEED, &dice.game_id.to_le_bytes()], program_id).0;
         if dice_account.key != &expected_dice {
@@ -414,7 +414,7 @@ impl Admin {
             return Err(InvalidGameAccount.into());
         }
 
-        let table = RussianRouletteGame::try_from_compatible_slice(&table_account.data.borrow())?;
+        let table = RussianRouletteGame::try_from_slice(&table_account.data.borrow())?;
         if table.table_id >= RUSSIAN_ROULETTE_TABLE_COUNT {
             return Err(InvalidGameAccount.into());
         }
@@ -616,7 +616,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_table_setter_cannot_change_the_fee_or_bypass_the_round_bump() {
+    fn stake_table_setter_cannot_change_the_fee_or_bypass_the_round_bump() {
         let (mismatch_result, unchanged) = run_table_update(
             table(0, RUSSIAN_ROULETTE_STATUS_OPEN),
             UpdateRussianRouletteTable {

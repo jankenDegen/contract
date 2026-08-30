@@ -94,87 +94,6 @@ pub struct RaffleState {
 }
 
 #[derive(BorshSerialize, BorshDeserialize, Debug, Clone, Copy, PartialEq)]
-pub struct LegacyRaffleState {
-    pub tickets_sold: u8,
-    pub sold_tickets: [u8; 100],
-    pub raffle_no: u32,
-    pub ticket_price: u64,
-    pub winner_prize: u64,
-    pub decimal_digit_match_prize: u64,
-    pub unit_digit_match_prize: u64,
-    pub program_fee: u64,
-    pub draw_status: u8,
-    pub winning_ticket_no: u8,
-    pub vrf_seed: [u8; 32],
-}
-
-impl From<LegacyRaffleState> for RaffleState {
-    fn from(value: LegacyRaffleState) -> Self {
-        Self {
-            tickets_sold: value.tickets_sold,
-            sold_tickets: value.sold_tickets,
-            raffle_no: value.raffle_no,
-            ticket_price: value.ticket_price,
-            winner_prize: value.winner_prize,
-            decimal_digit_match_prize: value.decimal_digit_match_prize,
-            unit_digit_match_prize: value.unit_digit_match_prize,
-            program_fee: value.program_fee,
-            draw_status: value.draw_status,
-            winning_ticket_no: value.winning_ticket_no,
-            vrf_seed: value.vrf_seed,
-            vrf_last_request_at: 0,
-            vrf_retry_count: 0,
-        }
-    }
-}
-
-impl From<RaffleState> for LegacyRaffleState {
-    fn from(value: RaffleState) -> Self {
-        Self {
-            tickets_sold: value.tickets_sold,
-            sold_tickets: value.sold_tickets,
-            raffle_no: value.raffle_no,
-            ticket_price: value.ticket_price,
-            winner_prize: value.winner_prize,
-            decimal_digit_match_prize: value.decimal_digit_match_prize,
-            unit_digit_match_prize: value.unit_digit_match_prize,
-            program_fee: value.program_fee,
-            draw_status: value.draw_status,
-            winning_ticket_no: value.winning_ticket_no,
-            vrf_seed: value.vrf_seed,
-        }
-    }
-}
-
-impl RaffleState {
-    pub fn try_from_compatible_slice(data: &[u8]) -> std::io::Result<Self> {
-        match data.len() as u64 {
-            crate::constants::LEGACY_RAFFLE_SPACE => {
-                LegacyRaffleState::try_from_slice(data).map(Into::into)
-            }
-            crate::constants::RAFFLE_SPACE => Self::try_from_slice(data),
-            _ => Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "invalid raffle account size",
-            )),
-        }
-    }
-
-    pub fn serialize_compatible(&self, data: &mut [u8]) -> std::io::Result<()> {
-        match data.len() as u64 {
-            crate::constants::LEGACY_RAFFLE_SPACE => {
-                LegacyRaffleState::from(*self).serialize(&mut &mut data[..])
-            }
-            crate::constants::RAFFLE_SPACE => self.serialize(&mut &mut data[..]),
-            _ => Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "invalid raffle account size",
-            )),
-        }
-    }
-}
-
-#[derive(BorshSerialize, BorshDeserialize, Debug, Clone, Copy, PartialEq)]
 pub struct RaffleManager {
     pub is_init: u8,
     pub total_raffles: u32,
@@ -264,63 +183,6 @@ pub struct DiceGame {
 }
 
 #[derive(BorshSerialize, BorshDeserialize, Clone, Copy)]
-pub struct LegacyDiceGame {
-    pub game_id: u64,
-    pub number_of_players: u8,
-    pub stake: u64,
-    pub initializer: [u8; 32],
-    pub player_2: [u8; 32],
-    pub player_3: [u8; 32],
-    pub player_4: [u8; 32],
-    pub player_5: [u8; 32],
-    pub player_6: [u8; 32],
-    pub chosen_dices: [u8; 6],
-    pub draw_status: u8,
-    pub winning_dice: u8,
-    pub vrf_seed: [u8; 32],
-    pub winner: [u8; 32],
-}
-
-impl From<LegacyDiceGame> for DiceGame {
-    fn from(value: LegacyDiceGame) -> Self {
-        Self {
-            game_id: value.game_id,
-            number_of_players: value.number_of_players,
-            stake: value.stake,
-            initializer: value.initializer,
-            player_2: value.player_2,
-            player_3: value.player_3,
-            player_4: value.player_4,
-            player_5: value.player_5,
-            player_6: value.player_6,
-            chosen_dices: value.chosen_dices,
-            draw_status: value.draw_status,
-            winning_dice: value.winning_dice,
-            vrf_seed: value.vrf_seed,
-            winner: value.winner,
-            program_fee: 0,
-            vrf_last_request_at: 0,
-            vrf_retry_count: 0,
-        }
-    }
-}
-
-impl DiceGame {
-    pub fn try_from_compatible_slice(data: &[u8]) -> std::io::Result<Self> {
-        match data.len() as u64 {
-            crate::constants::LEGACY_DICE_GAME_SPACE => {
-                LegacyDiceGame::try_from_slice(data).map(Into::into)
-            }
-            crate::constants::DICE_GAME_SPACE => Self::try_from_slice(data),
-            _ => Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "invalid dice account size",
-            )),
-        }
-    }
-}
-
-#[derive(BorshSerialize, BorshDeserialize, Clone, Copy)]
 pub struct RussianRouletteGame {
     pub table_id: u8,
     pub round_id: u64,
@@ -342,111 +204,14 @@ pub struct RussianRouletteGame {
     pub settled_at: i64,
 }
 
-#[derive(BorshSerialize, BorshDeserialize, Clone, Copy)]
-pub struct LegacyRussianRouletteGame {
-    pub table_id: u8,
-    pub round_id: u64,
-    pub draw_status: u8,
-    pub number_of_players: u8,
-    pub stake: u64,
-    pub program_fee: u64,
-    pub seat_1: [u8; 32],
-    pub seat_2: [u8; 32],
-    pub seat_3: [u8; 32],
-    pub seat_4: [u8; 32],
-    pub seat_5: [u8; 32],
-    pub seat_6: [u8; 32],
-    pub unlucky_player_index: u8,
-    pub vrf_seed: [u8; 32],
-    pub unlucky_player: [u8; 32],
-}
-
-impl From<LegacyRussianRouletteGame> for RussianRouletteGame {
-    fn from(value: LegacyRussianRouletteGame) -> Self {
-        Self {
-            table_id: value.table_id,
-            round_id: value.round_id,
-            draw_status: value.draw_status,
-            number_of_players: value.number_of_players,
-            stake: value.stake,
-            program_fee: value.program_fee,
-            seat_1: value.seat_1,
-            seat_2: value.seat_2,
-            seat_3: value.seat_3,
-            seat_4: value.seat_4,
-            seat_5: value.seat_5,
-            seat_6: value.seat_6,
-            unlucky_player_index: value.unlucky_player_index,
-            vrf_seed: value.vrf_seed,
-            unlucky_player: value.unlucky_player,
-            vrf_last_request_at: 0,
-            vrf_retry_count: 0,
-            settled_at: 0,
-        }
-    }
-}
-
-impl From<RussianRouletteGame> for LegacyRussianRouletteGame {
-    fn from(value: RussianRouletteGame) -> Self {
-        Self {
-            table_id: value.table_id,
-            round_id: value.round_id,
-            draw_status: value.draw_status,
-            number_of_players: value.number_of_players,
-            stake: value.stake,
-            program_fee: value.program_fee,
-            seat_1: value.seat_1,
-            seat_2: value.seat_2,
-            seat_3: value.seat_3,
-            seat_4: value.seat_4,
-            seat_5: value.seat_5,
-            seat_6: value.seat_6,
-            unlucky_player_index: value.unlucky_player_index,
-            vrf_seed: value.vrf_seed,
-            unlucky_player: value.unlucky_player,
-        }
-    }
-}
-
-impl RussianRouletteGame {
-    pub fn try_from_compatible_slice(data: &[u8]) -> std::io::Result<Self> {
-        match data.len() as u64 {
-            crate::constants::LEGACY_RUSSIAN_ROULETTE_GAME_SPACE => {
-                LegacyRussianRouletteGame::try_from_slice(data).map(Into::into)
-            }
-            crate::constants::RUSSIAN_ROULETTE_GAME_SPACE => Self::try_from_slice(data),
-            _ => Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "invalid roulette account size",
-            )),
-        }
-    }
-
-    pub fn serialize_compatible(&self, data: &mut [u8]) -> std::io::Result<()> {
-        match data.len() as u64 {
-            crate::constants::LEGACY_RUSSIAN_ROULETTE_GAME_SPACE => {
-                LegacyRussianRouletteGame::from(*self).serialize(&mut &mut data[..])
-            }
-            crate::constants::RUSSIAN_ROULETTE_GAME_SPACE => self.serialize(&mut &mut data[..]),
-            _ => Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "invalid roulette account size",
-            )),
-        }
-    }
-}
-
 #[cfg(test)]
-mod layout_compatibility_tests {
+mod account_layout_tests {
     use super::*;
-    use crate::constants::{
-        DICE_GAME_SPACE, LEGACY_DICE_GAME_SPACE, LEGACY_RAFFLE_SPACE,
-        LEGACY_RUSSIAN_ROULETTE_GAME_SPACE, RAFFLE_SPACE, RUSSIAN_ROULETTE_GAME_SPACE,
-    };
+    use crate::constants::{DICE_GAME_SPACE, RAFFLE_SPACE, RUSSIAN_ROULETTE_GAME_SPACE};
     use borsh::to_vec;
 
-    fn legacy_raffle() -> LegacyRaffleState {
-        LegacyRaffleState {
+    fn raffle() -> RaffleState {
+        RaffleState {
             tickets_sold: 16,
             sold_tickets: [1; 100],
             raffle_no: 7,
@@ -458,11 +223,13 @@ mod layout_compatibility_tests {
             draw_status: 0,
             winning_ticket_no: u8::MAX,
             vrf_seed: [3; 32],
+            vrf_last_request_at: 1_234,
+            vrf_retry_count: 2,
         }
     }
 
-    fn legacy_dice() -> LegacyDiceGame {
-        LegacyDiceGame {
+    fn dice() -> DiceGame {
+        DiceGame {
             game_id: 11,
             number_of_players: 6,
             stake: 10_000_000,
@@ -477,11 +244,14 @@ mod layout_compatibility_tests {
             winning_dice: 4,
             vrf_seed: [7; 32],
             winner: [4; 32],
+            program_fee: 3_000_000,
+            vrf_last_request_at: 1_234,
+            vrf_retry_count: 2,
         }
     }
 
-    fn legacy_roulette() -> LegacyRussianRouletteGame {
-        LegacyRussianRouletteGame {
+    fn roulette() -> RussianRouletteGame {
+        RussianRouletteGame {
             table_id: 0,
             round_id: 12,
             draw_status: 0,
@@ -497,67 +267,30 @@ mod layout_compatibility_tests {
             unlucky_player_index: u8::MAX,
             vrf_seed: [0; 32],
             unlucky_player: [0; 32],
+            vrf_last_request_at: 1_234,
+            vrf_retry_count: 2,
+            settled_at: 1_500,
         }
     }
 
     #[test]
-    fn raffle_v1_and_v2_layouts_are_exact_and_prefix_compatible() {
-        let legacy_bytes = to_vec(&legacy_raffle()).unwrap();
-        assert_eq!(legacy_bytes.len() as u64, LEGACY_RAFFLE_SPACE);
-        let mut current = RaffleState::try_from_compatible_slice(&legacy_bytes).unwrap();
-        assert_eq!(current.tickets_sold, 16);
-        assert_eq!(current.vrf_last_request_at, 0);
-        assert_eq!(current.vrf_retry_count, 0);
-        current.vrf_last_request_at = 1_234;
-        current.vrf_retry_count = 2;
-        let current_bytes = to_vec(&current).unwrap();
-        assert_eq!(current_bytes.len() as u64, RAFFLE_SPACE);
+    fn current_account_layouts_match_their_space_constants() {
+        assert_eq!(to_vec(&raffle()).unwrap().len() as u64, RAFFLE_SPACE);
+        assert_eq!(to_vec(&dice()).unwrap().len() as u64, DICE_GAME_SPACE);
         assert_eq!(
-            &current_bytes[..legacy_bytes.len()],
-            legacy_bytes.as_slice()
+            to_vec(&roulette()).unwrap().len() as u64,
+            RUSSIAN_ROULETTE_GAME_SPACE
         );
     }
 
     #[test]
-    fn dice_v1_and_v2_layouts_are_exact_and_prefix_compatible() {
-        let legacy_bytes = to_vec(&legacy_dice()).unwrap();
-        assert_eq!(legacy_bytes.len() as u64, LEGACY_DICE_GAME_SPACE);
-        let mut current = DiceGame::try_from_compatible_slice(&legacy_bytes).unwrap();
-        assert_eq!(current.game_id, 11);
-        assert_eq!(current.program_fee, 0);
-        assert_eq!(current.vrf_last_request_at, 0);
-        assert_eq!(current.vrf_retry_count, 0);
-        current.program_fee = 3_000_000;
-        current.vrf_last_request_at = 1_234;
-        current.vrf_retry_count = 2;
-        let current_bytes = to_vec(&current).unwrap();
-        assert_eq!(current_bytes.len() as u64, DICE_GAME_SPACE);
-        assert_eq!(
-            &current_bytes[..legacy_bytes.len()],
-            legacy_bytes.as_slice()
-        );
-    }
+    fn truncated_pre_retry_metadata_layouts_are_rejected() {
+        let raffle_bytes = to_vec(&raffle()).unwrap();
+        let dice_bytes = to_vec(&dice()).unwrap();
+        let roulette_bytes = to_vec(&roulette()).unwrap();
 
-    #[test]
-    fn roulette_v1_and_v2_layouts_are_exact_and_prefix_compatible() {
-        let legacy_bytes = to_vec(&legacy_roulette()).unwrap();
-        assert_eq!(
-            legacy_bytes.len() as u64,
-            LEGACY_RUSSIAN_ROULETTE_GAME_SPACE
-        );
-        let mut current = RussianRouletteGame::try_from_compatible_slice(&legacy_bytes).unwrap();
-        assert_eq!(current.round_id, 12);
-        assert_eq!(current.vrf_last_request_at, 0);
-        assert_eq!(current.vrf_retry_count, 0);
-        assert_eq!(current.settled_at, 0);
-        current.vrf_last_request_at = 1_234;
-        current.vrf_retry_count = 2;
-        current.settled_at = 1_500;
-        let current_bytes = to_vec(&current).unwrap();
-        assert_eq!(current_bytes.len() as u64, RUSSIAN_ROULETTE_GAME_SPACE);
-        assert_eq!(
-            &current_bytes[..legacy_bytes.len()],
-            legacy_bytes.as_slice()
-        );
+        assert!(RaffleState::try_from_slice(&raffle_bytes[..179]).is_err());
+        assert!(DiceGame::try_from_slice(&dice_bytes[..281]).is_err());
+        assert!(RussianRouletteGame::try_from_slice(&roulette_bytes[..284]).is_err());
     }
 }

@@ -2,14 +2,10 @@ pub const GAME_SPACE: u64 = 124;
 pub const MANAGER_SPACE: u64 = 27;
 pub const CONFIG_SPACE: u64 = 161;
 pub const TICKET_SPACE: u64 = 69;
-pub const LEGACY_RAFFLE_SPACE: u64 = 179;
 pub const RAFFLE_SPACE: u64 = 188;
 pub const RAFFLE_MANAGER_SPACE: u64 = 45;
 pub const DICE_MANAGER_SPACE: u64 = 17;
-pub const LEGACY_DICE_GAME_SPACE: u64 = 281;
 pub const DICE_GAME_SPACE: u64 = 298;
-pub const RUSSIAN_ROULETTE_MANAGER_SPACE: u64 = 17;
-pub const LEGACY_RUSSIAN_ROULETTE_GAME_SPACE: u64 = 284;
 pub const RUSSIAN_ROULETTE_GAME_SPACE: u64 = 301;
 
 pub const VRF_RETRY_DELAY_SECONDS: i64 = 120;
@@ -27,7 +23,6 @@ pub const DICE_SEED: &[u8] = b"dice";
 pub const DICE_MANAGER_SEED: &[u8] = b"dicemanager";
 pub const DICE_VRF_SEED: &[u8] = b"dice-vrf";
 pub const RUSSIAN_ROULETTE_SEED: &[u8] = b"russianroulette";
-pub const RUSSIAN_ROULETTE_MANAGER_SEED: &[u8] = b"russianroulettemanager";
 pub const RUSSIAN_ROULETTE_VRF_SEED: &[u8] = b"russianroulette-vrf";
 
 pub const RAFFLE_VRF_CALLBACK_TAG: u8 = 90;
@@ -55,10 +50,6 @@ pub const RUSSIAN_ROULETTE_STARTER_STAKE: u64 = 100_000_000;
 pub const RUSSIAN_ROULETTE_PRIME_STAKE: u64 = 500_000_000;
 pub const RUSSIAN_ROULETTE_APEX_STAKE: u64 = 1_000_000_000;
 pub const RUSSIAN_ROULETTE_DEFAULT_PARTICIPATION_FEE: u64 = 10_000_000;
-#[deprecated(
-    note = "roulette participation fees are table-specific and admin-updatable; use RUSSIAN_ROULETTE_DEFAULT_PARTICIPATION_FEE only as an initialization default"
-)]
-pub const RUSSIAN_ROULETTE_PARTICIPATION_FEE: u64 = RUSSIAN_ROULETTE_DEFAULT_PARTICIPATION_FEE;
 pub const RUSSIAN_ROULETTE_STATUS_OPEN: u8 = 0;
 pub const RUSSIAN_ROULETTE_STATUS_PENDING: u8 = 1;
 pub const RUSSIAN_ROULETTE_STATUS_DRAWN: u8 = 2;

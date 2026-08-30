@@ -390,9 +390,9 @@ mod tests {
         data.push(0);
         assert!(RPSProgramInstruction::unpack(&data).is_err());
 
-        let mut legacy_data = vec![91];
-        legacy_data.extend_from_slice(&randomness);
-        assert!(RPSProgramInstruction::unpack(&legacy_data).is_err());
+        let mut unseeded_data = vec![91];
+        unseeded_data.extend_from_slice(&randomness);
+        assert!(RPSProgramInstruction::unpack(&unseeded_data).is_err());
     }
 
     #[test]
@@ -417,9 +417,9 @@ mod tests {
         data.push(0);
         assert!(RPSProgramInstruction::unpack(&data).is_err());
 
-        let mut legacy_data = vec![92];
-        legacy_data.extend_from_slice(&randomness);
-        assert!(RPSProgramInstruction::unpack(&legacy_data).is_err());
+        let mut unseeded_data = vec![92];
+        unseeded_data.extend_from_slice(&randomness);
+        assert!(RPSProgramInstruction::unpack(&unseeded_data).is_err());
     }
 
     #[test]
@@ -439,9 +439,9 @@ mod tests {
 
         data.push(0);
         assert!(RPSProgramInstruction::unpack(&data).is_err());
-        let mut legacy_data = vec![90];
-        legacy_data.extend_from_slice(&randomness);
-        assert!(RPSProgramInstruction::unpack(&legacy_data).is_err());
+        let mut unseeded_data = vec![90];
+        unseeded_data.extend_from_slice(&randomness);
+        assert!(RPSProgramInstruction::unpack(&unseeded_data).is_err());
     }
 
     #[test]

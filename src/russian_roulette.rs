@@ -1,7 +1,6 @@
 use crate::{
     constants::{
-        LEGACY_RUSSIAN_ROULETTE_GAME_SPACE, MANAGER_SEED, RUSSIAN_ROULETTE_GAME_SPACE,
-        RUSSIAN_ROULETTE_PLAYER_COUNT, RUSSIAN_ROULETTE_RESULT_RETENTION_SECONDS,
+        MANAGER_SEED, RUSSIAN_ROULETTE_PLAYER_COUNT, RUSSIAN_ROULETTE_RESULT_RETENTION_SECONDS,
         RUSSIAN_ROULETTE_SEED, RUSSIAN_ROULETTE_STATUS_DRAWN, RUSSIAN_ROULETTE_STATUS_OPEN,
         RUSSIAN_ROULETTE_STATUS_PENDING, RUSSIAN_ROULETTE_STATUS_VRF_FAILED,
         RUSSIAN_ROULETTE_TABLE_COUNT, RUSSIAN_ROULETTE_VRF_CALLBACK_TAG, RUSSIAN_ROULETTE_VRF_SEED,
@@ -58,11 +57,10 @@ impl RussianRoulette {
         if game.round_id != init_game.expected_round_id {
             return Err(InvalidGameState.into());
         }
-        Self::ensure_current_space(player, game_account, system_program_account, &game)?;
         Self::sit_player(&mut game, player.key, init_game.seat)?;
         Self::collect_participation_payment(player, game_account, system_program_account, &game)?;
 
-        game.serialize_compatible(&mut game_account.data.borrow_mut())?;
+        game.serialize(&mut &mut game_account.data.borrow_mut()[..])?;
 
         Ok(())
     }
@@ -90,11 +88,10 @@ impl RussianRoulette {
         if game.round_id != join_game.expected_round_id {
             return Err(InvalidGameState.into());
         }
-        Self::ensure_current_space(player, game_account, system_program_account, &game)?;
         Self::sit_player(&mut game, player.key, join_game.seat)?;
         Self::collect_participation_payment(player, game_account, system_program_account, &game)?;
 
-        game.serialize_compatible(&mut game_account.data.borrow_mut())?;
+        game.serialize(&mut &mut game_account.data.borrow_mut()[..])?;
 
         Ok(())
     }
@@ -149,8 +146,6 @@ impl RussianRoulette {
         ];
         Self::load_fee_manager(manager_account, program_id)?;
         Self::validate_player_accounts(&game, &player_accounts)?;
-        Self::ensure_current_space(payer, game_account, system_program_account, &game)?;
-
         let clock = Clock::get()?;
         let vrf_seed =
             Self::vrf_request_seed(game_account.key, game.table_id, game.round_id, clock.slot);
@@ -176,7 +171,7 @@ impl RussianRoulette {
         game.vrf_last_request_at = clock.unix_timestamp;
         game.vrf_retry_count = 0;
         game.settled_at = 0;
-        game.serialize_compatible(&mut game_account.data.borrow_mut())?;
+        game.serialize(&mut &mut game_account.data.borrow_mut()[..])?;
 
         Ok(())
     }
@@ -211,8 +206,6 @@ impl RussianRoulette {
             return Err(RussianRouletteGameNotReady.into());
         }
         Self::validate_unresolved_pending(&game)?;
-        Self::ensure_current_space(payer, game_account, system_program_account, &game)?;
-
         let request_seed = game.vrf_seed;
         let clock = Clock::get()?;
         let next_retry_count = Utils::next_vrf_retry_count(game.vrf_retry_count)?;
@@ -243,7 +236,7 @@ impl RussianRoulette {
 
         game.vrf_retry_count = next_retry_count;
         game.vrf_last_request_at = clock.unix_timestamp;
-        game.serialize_compatible(&mut game_account.data.borrow_mut())?;
+        game.serialize(&mut &mut game_account.data.borrow_mut()[..])?;
 
         Ok(())
     }
@@ -301,7 +294,7 @@ impl RussianRoulette {
         )?;
         game.settled_at = Clock::get()?.unix_timestamp;
 
-        game.serialize_compatible(&mut game_account.data.borrow_mut())?;
+        game.serialize(&mut &mut game_account.data.borrow_mut()[..])?;
         manager.serialize(&mut &mut manager_account.data.borrow_mut()[..])?;
 
         let losing_seat = game.unlucky_player_index + 1;
@@ -365,7 +358,7 @@ impl RussianRoulette {
         let unlucky_player_index = Self::unlucky_player_index(&randomness);
         game.vrf_seed = randomness;
         game.unlucky_player_index = unlucky_player_index;
-        game.serialize_compatible(&mut game_account.data.borrow_mut())?;
+        game.serialize(&mut &mut game_account.data.borrow_mut()[..])?;
 
         msg!(
             "roulette_vrf_result table_id={} round_id={} randomness={} random_u64={} losing_seat={}",
@@ -396,22 +389,10 @@ impl RussianRoulette {
         if game.round_id != expected_round_id || game.draw_status != RUSSIAN_ROULETTE_STATUS_DRAWN {
             return Err(InvalidGameState.into());
         }
-        if game.settled_at == 0 {
-            if game_account.data_len() as u64 != LEGACY_RUSSIAN_ROULETTE_GAME_SPACE {
-                return Err(InvalidGameState.into());
-            }
-        } else {
-            let reset_at = game
-                .settled_at
-                .checked_add(RUSSIAN_ROULETTE_RESULT_RETENTION_SECONDS)
-                .ok_or(ArithmeticError)?;
-            if Clock::get()?.unix_timestamp < reset_at {
-                return Err(VrfRetryTooEarly.into());
-            }
-        }
+        Self::require_result_retention(game.settled_at, Clock::get()?.unix_timestamp)?;
 
         Self::clear_table_for_next_round(&mut game)?;
-        game.serialize_compatible(&mut game_account.data.borrow_mut())?;
+        game.serialize(&mut &mut game_account.data.borrow_mut()[..])?;
 
         Ok(())
     }
@@ -435,7 +416,7 @@ impl RussianRoulette {
         )?;
 
         game.draw_status = RUSSIAN_ROULETTE_STATUS_VRF_FAILED;
-        game.serialize_compatible(&mut game_account.data.borrow_mut())?;
+        game.serialize(&mut &mut game_account.data.borrow_mut()[..])?;
         Ok(())
     }
 
@@ -489,7 +470,7 @@ impl RussianRoulette {
             game.program_fee
         );
         Self::clear_table_for_next_round(&mut game)?;
-        game.serialize_compatible(&mut game_account.data.borrow_mut())?;
+        game.serialize(&mut &mut game_account.data.borrow_mut()[..])?;
         manager.serialize(&mut &mut manager_account.data.borrow_mut()[..])?;
         Ok(())
     }
@@ -635,26 +616,7 @@ impl RussianRoulette {
     }
 
     fn load_game(game_account: &AccountInfo) -> Result<RussianRouletteGame, ProgramError> {
-        RussianRouletteGame::try_from_compatible_slice(&game_account.data.borrow())
-            .map_err(ProgramError::from)
-    }
-
-    fn ensure_current_space<'a>(
-        payer: &AccountInfo<'a>,
-        game_account: &AccountInfo<'a>,
-        system_program_account: &AccountInfo<'a>,
-        game: &RussianRouletteGame,
-    ) -> ProgramResult {
-        let liability = Self::participation_payment_amount(game)?
-            .checked_mul(game.number_of_players as u64)
-            .ok_or(ArithmeticError)?;
-        Utils::ensure_account_space(
-            payer,
-            game_account,
-            system_program_account,
-            RUSSIAN_ROULETTE_GAME_SPACE as usize,
-            liability,
-        )
+        RussianRouletteGame::try_from_slice(&game_account.data.borrow()).map_err(ProgramError::from)
     }
 
     fn validate_unresolved_pending(game: &RussianRouletteGame) -> ProgramResult {
@@ -764,6 +726,19 @@ impl RussianRoulette {
         game.vrf_last_request_at = 0;
         game.vrf_retry_count = 0;
         game.settled_at = 0;
+        Ok(())
+    }
+
+    fn require_result_retention(settled_at: i64, now: i64) -> ProgramResult {
+        if settled_at == 0 {
+            return Err(InvalidGameState.into());
+        }
+        let reset_at = settled_at
+            .checked_add(RUSSIAN_ROULETTE_RESULT_RETENTION_SECONDS)
+            .ok_or(ArithmeticError)?;
+        if now < reset_at {
+            return Err(VrfRetryTooEarly.into());
+        }
         Ok(())
     }
 
@@ -882,11 +857,24 @@ mod tests {
     }
 
     #[test]
-    fn roulette_table_layout_remains_compatible() {
+    fn roulette_table_layout_matches_current_space() {
         assert_eq!(
             borsh::to_vec(&game(25_000_000)).unwrap().len(),
             crate::constants::RUSSIAN_ROULETTE_GAME_SPACE as usize
         );
+    }
+
+    #[test]
+    fn current_tables_require_a_recorded_settlement_and_full_retention_period() {
+        assert_eq!(
+            RussianRoulette::require_result_retention(0, 10_000).unwrap_err(),
+            ProgramError::from(InvalidGameState)
+        );
+        assert_eq!(
+            RussianRoulette::require_result_retention(1_000, 1_119).unwrap_err(),
+            ProgramError::from(VrfRetryTooEarly)
+        );
+        assert!(RussianRoulette::require_result_retention(1_000, 1_120).is_ok());
     }
 
     #[test]

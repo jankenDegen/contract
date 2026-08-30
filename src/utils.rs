@@ -1,12 +1,7 @@
 use borsh::BorshDeserialize;
 use solana_program::{
-    account_info::AccountInfo,
-    entrypoint::ProgramResult,
-    program::{invoke, invoke_signed},
-    program_error::ProgramError,
-    pubkey::Pubkey,
-    rent::Rent,
-    sysvar::Sysvar,
+    account_info::AccountInfo, entrypoint::ProgramResult, program::invoke_signed,
+    program_error::ProgramError, pubkey::Pubkey, rent::Rent, sysvar::Sysvar,
 };
 use solana_system_interface::{
     instruction::{create_account, transfer},
@@ -18,7 +13,7 @@ use crate::state::Config;
 use crate::constants::{VRF_MAX_RETRIES, VRF_RETRY_DELAY_SECONDS};
 use crate::error::RPSProgramError::{
     AccountAlreadyInitialized, ArithmeticError, InvalidAuth, InvalidConfig, InvalidDerivedAccount,
-    InvalidPayer, NotSignerAuth, VrfFailureTooEarly, VrfRetriesNotExhausted, VrfRetryLimitReached,
+    NotSignerAuth, VrfFailureTooEarly, VrfRetriesNotExhausted, VrfRetryLimitReached,
     VrfRetryTooEarly,
 };
 
@@ -109,44 +104,6 @@ impl Utils {
         )?;
 
         Ok(bump)
-    }
-
-    pub fn ensure_account_space<'a>(
-        payer: &AccountInfo<'a>,
-        account: &AccountInfo<'a>,
-        system_program_account: &AccountInfo<'a>,
-        new_space: usize,
-        escrow_liability: u64,
-    ) -> ProgramResult {
-        if account.data_len() >= new_space {
-            return Ok(());
-        }
-        if !payer.is_signer {
-            return Err(InvalidPayer.into());
-        }
-        if system_program_account.key != &system_program::ID {
-            return Err(InvalidDerivedAccount.into());
-        }
-
-        let current_lamports = **account.try_borrow_lamports()?;
-        let rent_reserve = current_lamports
-            .checked_sub(escrow_liability)
-            .ok_or(ArithmeticError)?;
-        let required_rent = Rent::get()?.minimum_balance(new_space);
-        let top_up = required_rent.saturating_sub(rent_reserve);
-
-        if top_up != 0 {
-            invoke(
-                &transfer(payer.key, account.key, top_up),
-                &[
-                    payer.clone(),
-                    account.clone(),
-                    system_program_account.clone(),
-                ],
-            )?;
-        }
-
-        account.resize(new_space)
     }
 
     pub fn next_vrf_retry_count(current: u8) -> Result<u8, ProgramError> {

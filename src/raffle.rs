@@ -55,18 +55,6 @@ impl Raffle {
             return Err(InvalidRaffleState.into());
         }
 
-        let escrow_liability = raffle
-            .ticket_price
-            .checked_mul(raffle.tickets_sold as u64)
-            .ok_or(ArithmeticError)?;
-        Utils::ensure_account_space(
-            payer,
-            raffle_account,
-            system_program_account,
-            RAFFLE_SPACE as usize,
-            escrow_liability,
-        )?;
-
         let ticket_no_bytes = buy.ticket_no.to_le_bytes();
         let raffle_no_bytes = raffle.raffle_no.to_le_bytes();
         let seeds: &[&[u8]] = &[TICKET_SEED, &ticket_no_bytes, RAFFLE_SEED, &raffle_no_bytes];
@@ -100,7 +88,7 @@ impl Raffle {
         )?;
 
         ticket.serialize(&mut &mut ticket_account.data.borrow_mut()[..])?;
-        raffle.serialize_compatible(&mut raffle_account.data.borrow_mut())?;
+        raffle.serialize(&mut &mut raffle_account.data.borrow_mut()[..])?;
 
         Ok(())
     }
@@ -194,18 +182,6 @@ impl Raffle {
             return Err(RaffleDrawAlreadyRequested.into());
         }
 
-        let escrow_liability = raffle
-            .ticket_price
-            .checked_mul(raffle.tickets_sold as u64)
-            .ok_or(ArithmeticError)?;
-        Utils::ensure_account_space(
-            payer,
-            raffle_account,
-            system_program_account,
-            RAFFLE_SPACE as usize,
-            escrow_liability,
-        )?;
-
         let clock = Clock::get()?;
         let vrf_seed = Self::vrf_request_seed(raffle_account.key, raffle.raffle_no, clock.slot);
         MagicBlockVrf::request_randomness(
@@ -227,7 +203,7 @@ impl Raffle {
         raffle.vrf_seed = vrf_seed;
         raffle.vrf_last_request_at = clock.unix_timestamp;
         raffle.vrf_retry_count = 0;
-        raffle.serialize_compatible(&mut raffle_account.data.borrow_mut())?;
+        raffle.serialize(&mut &mut raffle_account.data.borrow_mut()[..])?;
 
         Ok(())
     }
@@ -287,7 +263,7 @@ impl Raffle {
         **raffle_account.try_borrow_mut_lamports()? -= raffle.program_fee;
         **manager_account.try_borrow_mut_lamports()? += raffle.program_fee;
 
-        raffle.serialize_compatible(&mut raffle_account.data.borrow_mut())?;
+        raffle.serialize(&mut &mut raffle_account.data.borrow_mut()[..])?;
         manager.serialize(&mut &mut manager_account.data.borrow_mut()[..])?;
 
         msg!(
@@ -341,7 +317,7 @@ impl Raffle {
             Self::winning_ticket_no(&randomness, &raffle.sold_tickets, raffle.tickets_sold)?;
         raffle.vrf_seed = randomness;
         raffle.winning_ticket_no = winning_ticket_no;
-        raffle.serialize_compatible(&mut raffle_account.data.borrow_mut())?;
+        raffle.serialize(&mut &mut raffle_account.data.borrow_mut()[..])?;
 
         msg!(
             "raffle_vrf_result raffle_no={} randomness={} random_u64={} winning_ticket_no={}",
@@ -415,7 +391,7 @@ impl Raffle {
         ticket_account.resize(0)?;
         ticket_account.assign(&system_program::ID);
 
-        raffle.serialize_compatible(&mut raffle_account.data.borrow_mut())?;
+        raffle.serialize(&mut &mut raffle_account.data.borrow_mut()[..])?;
 
         msg!(
             "raffle_ticket_result raffle_no={} ticket_no={} winning_ticket_no={} player={} outcome={} ticket_stake_lamports={} payout_lamports={}",
@@ -448,18 +424,6 @@ impl Raffle {
         Self::validate_raffle_account(raffle_account, &raffle, program_id)?;
         Self::validate_unresolved_pending(&raffle)?;
 
-        let escrow_liability = raffle
-            .ticket_price
-            .checked_mul(raffle.tickets_sold as u64)
-            .ok_or(ArithmeticError)?;
-        Utils::ensure_account_space(
-            payer,
-            raffle_account,
-            system_program_account,
-            RAFFLE_SPACE as usize,
-            escrow_liability,
-        )?;
-
         let clock = Clock::get()?;
         let next_retry_count = Utils::next_vrf_retry_count(raffle.vrf_retry_count)?;
         Utils::require_vrf_retry_delay(raffle.vrf_last_request_at, clock.unix_timestamp)?;
@@ -486,7 +450,7 @@ impl Raffle {
 
         raffle.vrf_retry_count = next_retry_count;
         raffle.vrf_last_request_at = clock.unix_timestamp;
-        raffle.serialize_compatible(&mut raffle_account.data.borrow_mut())?;
+        raffle.serialize(&mut &mut raffle_account.data.borrow_mut()[..])?;
         Ok(())
     }
 
@@ -499,7 +463,7 @@ impl Raffle {
         Utils::require_vrf_failure_delay(raffle.vrf_retry_count, raffle.vrf_last_request_at, now)?;
 
         raffle.draw_status = RAFFLE_STATUS_VRF_FAILED;
-        raffle.serialize_compatible(&mut raffle_account.data.borrow_mut())?;
+        raffle.serialize(&mut &mut raffle_account.data.borrow_mut()[..])?;
         Ok(())
     }
 
@@ -549,7 +513,7 @@ impl Raffle {
         ticket_account.resize(0)?;
         ticket_account.assign(&system_program::ID);
 
-        raffle.serialize_compatible(&mut raffle_account.data.borrow_mut())?;
+        raffle.serialize(&mut &mut raffle_account.data.borrow_mut()[..])?;
         Ok(())
     }
 
@@ -579,8 +543,7 @@ impl Raffle {
     }
 
     fn load_raffle(raffle_account: &AccountInfo) -> Result<RaffleState, ProgramError> {
-        RaffleState::try_from_compatible_slice(&raffle_account.data.borrow())
-            .map_err(ProgramError::from)
+        RaffleState::try_from_slice(&raffle_account.data.borrow()).map_err(ProgramError::from)
     }
 
     fn validate_raffle_account(
