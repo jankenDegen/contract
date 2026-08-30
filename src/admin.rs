@@ -1,7 +1,8 @@
 use crate::{
     constants::{
-        DICE_STATUS_DRAWN, RAFFLE_STATUS_DRAWN, RAFFLE_TICKET_COUNT, RUSSIAN_ROULETTE_PLAYER_COUNT,
-        RUSSIAN_ROULETTE_SEED, RUSSIAN_ROULETTE_STATUS_OPEN,
+        DICE_SEED, DICE_STATUS_DRAWN, RAFFLE_SEED, RAFFLE_STATUS_DRAWN, RAFFLE_STATUS_VRF_FAILED,
+        RAFFLE_TICKET_COUNT, RUSSIAN_ROULETTE_PLAYER_COUNT, RUSSIAN_ROULETTE_SEED,
+        RUSSIAN_ROULETTE_STATUS_OPEN, RUSSIAN_ROULETTE_TABLE_COUNT,
     },
     error::RPSProgramError::{
         InvalidDiceConfiguration, InvalidFeePercentage, InvalidRaffleAccount,
@@ -166,7 +167,7 @@ impl Admin {
             table.stake = new_table.stake;
             table.round_id = table.round_id.checked_add(1).ok_or(ArithmeticError)?;
         }
-        table.serialize(&mut &mut table_account.data.borrow_mut()[..])?;
+        table.serialize_compatible(&mut table_account.data.borrow_mut())?;
 
         Ok(())
     }
@@ -202,7 +203,7 @@ impl Admin {
         let previous_fee = table.program_fee;
         table.program_fee = update.program_fee;
         table.round_id = table.round_id.checked_add(1).ok_or(ArithmeticError)?;
-        table.serialize(&mut &mut table_account.data.borrow_mut()[..])?;
+        table.serialize_compatible(&mut table_account.data.borrow_mut())?;
 
         msg!(
             "roulette_participation_fee_updated table_id={} round_id={} previous_fee_lamports={} program_fee_lamports={}",
@@ -253,9 +254,19 @@ impl Admin {
             return Err(InvalidRaffleAccount.into());
         }
 
-        let raffle: RaffleState = RaffleState::try_from_slice(&raffle_account.data.borrow())?;
+        let raffle = RaffleState::try_from_compatible_slice(&raffle_account.data.borrow())?;
+        let expected_raffle = Pubkey::find_program_address(
+            &[RAFFLE_SEED, &raffle.raffle_no.to_le_bytes()],
+            program_id,
+        )
+        .0;
+        if raffle_account.key != &expected_raffle {
+            return Err(InvalidRaffleAccount.into());
+        }
 
-        if raffle.draw_status != RAFFLE_STATUS_DRAWN {
+        if raffle.draw_status != RAFFLE_STATUS_DRAWN
+            && raffle.draw_status != RAFFLE_STATUS_VRF_FAILED
+        {
             return Err(InvalidRaffleState.into());
         }
         if raffle.tickets_sold != 0 {
@@ -276,24 +287,33 @@ impl Admin {
     pub fn close_dice_game(accounts: &[AccountInfo], program_id: &Pubkey) -> ProgramResult {
         let accounts_iter: &mut std::slice::Iter<'_, AccountInfo<'_>> = &mut accounts.iter();
 
-        let admin: &AccountInfo<'_> = next_account_info(accounts_iter)?;
+        let initializer: &AccountInfo<'_> = next_account_info(accounts_iter)?;
         let dice_account: &AccountInfo<'_> = next_account_info(accounts_iter)?;
-        let config_account: &AccountInfo<'_> = next_account_info(accounts_iter)?;
 
-        Utils::check_admin(admin, config_account, program_id)?;
         if dice_account.owner != program_id {
             return Err(InvalidGameAccount.into());
         }
 
-        let dice: DiceGame = DiceGame::try_from_slice(&dice_account.data.borrow())?;
+        let dice = DiceGame::try_from_compatible_slice(&dice_account.data.borrow())?;
+        let expected_dice =
+            Pubkey::find_program_address(&[DICE_SEED, &dice.game_id.to_le_bytes()], program_id).0;
+        if dice_account.key != &expected_dice {
+            return Err(InvalidGameAccount.into());
+        }
         if dice.draw_status != DICE_STATUS_DRAWN {
             return Err(InvalidGameState.into());
+        }
+        if initializer.key.to_bytes() != dice.initializer {
+            return Err(crate::error::RPSProgramError::InvalidInitializer.into());
         }
 
         let rest = **dice_account.try_borrow_lamports()?;
 
         **dice_account.try_borrow_mut_lamports()? -= rest;
-        **admin.try_borrow_mut_lamports()? += rest;
+        **initializer.try_borrow_mut_lamports()? = initializer
+            .lamports()
+            .checked_add(rest)
+            .ok_or(ArithmeticError)?;
 
         dice_account.resize(0)?;
         dice_account.assign(&system_program::ID);
@@ -312,12 +332,7 @@ impl Admin {
         let config_account: &AccountInfo<'_> = next_account_info(accounts_iter)?;
 
         Utils::check_admin(admin, config_account, program_id)?;
-        if game_account.owner != program_id {
-            return Err(InvalidGameAccount.into());
-        }
-
-        let game: RussianRouletteGame =
-            RussianRouletteGame::try_from_slice(&game_account.data.borrow())?;
+        let game = Self::load_russian_roulette_table(game_account, program_id)?;
         if game.draw_status != RUSSIAN_ROULETTE_STATUS_OPEN || game.number_of_players != 0 {
             return Err(InvalidGameState.into());
         }
@@ -399,7 +414,10 @@ impl Admin {
             return Err(InvalidGameAccount.into());
         }
 
-        let table = RussianRouletteGame::try_from_slice(&table_account.data.borrow())?;
+        let table = RussianRouletteGame::try_from_compatible_slice(&table_account.data.borrow())?;
+        if table.table_id >= RUSSIAN_ROULETTE_TABLE_COUNT {
+            return Err(InvalidGameAccount.into());
+        }
         let table_id = [table.table_id];
         let expected_table =
             Pubkey::find_program_address(&[RUSSIAN_ROULETTE_SEED, &table_id], program_id).0;
@@ -437,6 +455,9 @@ mod tests {
             unlucky_player_index: UNLUCKY_PLAYER_INDEX_NONE,
             vrf_seed: [0; 32],
             unlucky_player: [0; 32],
+            vrf_last_request_at: 0,
+            vrf_retry_count: 0,
+            settled_at: 0,
         }
     }
 

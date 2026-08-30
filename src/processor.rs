@@ -42,8 +42,11 @@ impl Processor {
             RPSProgramInstruction::FinalizeRaffleDraw => {
                 Raffle::finalize_draw(accounts, program_id)
             }
-            RPSProgramInstruction::RaffleVrfCallback { randomness } => {
-                Raffle::consume_vrf_randomness(accounts, program_id, randomness)
+            RPSProgramInstruction::RaffleVrfCallback {
+                expected_vrf_seed,
+                randomness,
+            } => {
+                Raffle::consume_vrf_randomness(accounts, program_id, expected_vrf_seed, randomness)
             }
             RPSProgramInstruction::ClaimPrize => Raffle::claim_prize(accounts, program_id),
 
@@ -60,9 +63,6 @@ impl Processor {
             }
             RPSProgramInstruction::RequestDiceDraw => Dice::request_draw(accounts, program_id),
             RPSProgramInstruction::FinalizeDiceDraw => Dice::finalize_draw(accounts, program_id),
-            RPSProgramInstruction::LegacyDiceVrfCallback { randomness } => {
-                Dice::consume_legacy_vrf_randomness(accounts, program_id, randomness)
-            }
             RPSProgramInstruction::DiceVrfCallback {
                 expected_vrf_seed,
                 randomness,
@@ -108,6 +108,24 @@ impl Processor {
             }
             RPSProgramInstruction::SetRussianRouletteParticipationFee { update } => {
                 Admin::set_russian_roulette_participation_fee(accounts, program_id, update)
+            }
+            RPSProgramInstruction::RetryRaffleDraw => Raffle::retry_draw(accounts, program_id),
+            RPSProgramInstruction::MarkRaffleVrfFailed => {
+                Raffle::mark_vrf_failed(accounts, program_id)
+            }
+            RPSProgramInstruction::RefundFailedRaffleTicket => {
+                Raffle::refund_failed_ticket(accounts, program_id)
+            }
+            RPSProgramInstruction::RetryDiceDraw => Dice::retry_draw(accounts, program_id),
+            RPSProgramInstruction::MarkDiceVrfFailed => Dice::mark_vrf_failed(accounts, program_id),
+            RPSProgramInstruction::RefundFailedDiceGame => {
+                Dice::refund_failed_game(accounts, program_id)
+            }
+            RPSProgramInstruction::MarkRussianRouletteVrfFailed { expected_round_id } => {
+                RussianRoulette::mark_vrf_failed(accounts, program_id, expected_round_id)
+            }
+            RPSProgramInstruction::RefundFailedRussianRouletteRound { expected_round_id } => {
+                RussianRoulette::refund_failed_round(accounts, program_id, expected_round_id)
             }
         }
     }

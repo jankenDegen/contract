@@ -37,6 +37,7 @@ pub enum RPSProgramInstruction {
     RequestRaffleDraw,
     FinalizeRaffleDraw,
     RaffleVrfCallback {
+        expected_vrf_seed: [u8; 32],
         randomness: [u8; 32],
     },
     ClaimPrize,
@@ -53,9 +54,6 @@ pub enum RPSProgramInstruction {
     },
     RequestDiceDraw,
     FinalizeDiceDraw,
-    LegacyDiceVrfCallback {
-        randomness: [u8; 32],
-    },
     DiceVrfCallback {
         expected_vrf_seed: [u8; 32],
         randomness: [u8; 32],
@@ -93,6 +91,18 @@ pub enum RPSProgramInstruction {
     },
     SetRussianRouletteParticipationFee {
         update: UpdateRussianRouletteParticipationFee,
+    },
+    RetryRaffleDraw,
+    MarkRaffleVrfFailed,
+    RefundFailedRaffleTicket,
+    RetryDiceDraw,
+    MarkDiceVrfFailed,
+    RefundFailedDiceGame,
+    MarkRussianRouletteVrfFailed {
+        expected_round_id: u64,
+    },
+    RefundFailedRussianRouletteRound {
+        expected_round_id: u64,
     },
 }
 
@@ -169,22 +179,50 @@ impl RPSProgramInstruction {
             34 => Self::SetRussianRouletteParticipationFee {
                 update: UpdateRussianRouletteParticipationFee::try_from_slice(rest)?,
             },
-            90 => Self::RaffleVrfCallback {
-                randomness: Self::unpack_randomness(rest)?,
+            35 => {
+                Self::require_empty(rest)?;
+                Self::RetryRaffleDraw
+            }
+            36 => {
+                Self::require_empty(rest)?;
+                Self::MarkRaffleVrfFailed
+            }
+            37 => {
+                Self::require_empty(rest)?;
+                Self::RefundFailedRaffleTicket
+            }
+            38 => {
+                Self::require_empty(rest)?;
+                Self::RetryDiceDraw
+            }
+            39 => {
+                Self::require_empty(rest)?;
+                Self::MarkDiceVrfFailed
+            }
+            40 => {
+                Self::require_empty(rest)?;
+                Self::RefundFailedDiceGame
+            }
+            41 => Self::MarkRussianRouletteVrfFailed {
+                expected_round_id: u64::try_from_slice(rest)?,
             },
-            91 => match rest.len() {
-                32 => Self::LegacyDiceVrfCallback {
-                    randomness: Self::unpack_randomness(rest)?,
-                },
-                64 => {
-                    let (expected_vrf_seed, randomness) = Self::unpack_seeded_randomness(rest)?;
-                    Self::DiceVrfCallback {
-                        expected_vrf_seed,
-                        randomness,
-                    }
+            42 => Self::RefundFailedRussianRouletteRound {
+                expected_round_id: u64::try_from_slice(rest)?,
+            },
+            90 => {
+                let (expected_vrf_seed, randomness) = Self::unpack_seeded_randomness(rest)?;
+                Self::RaffleVrfCallback {
+                    expected_vrf_seed,
+                    randomness,
                 }
-                _ => return Err(InvalidInstruction.into()),
-            },
+            }
+            91 => {
+                let (expected_vrf_seed, randomness) = Self::unpack_seeded_randomness(rest)?;
+                Self::DiceVrfCallback {
+                    expected_vrf_seed,
+                    randomness,
+                }
+            }
             92 => {
                 let (expected_round_id, expected_vrf_seed, randomness) =
                     Self::unpack_roulette_randomness(rest)?;
@@ -199,14 +237,12 @@ impl RPSProgramInstruction {
         })
     }
 
-    fn unpack_randomness(input: &[u8]) -> Result<[u8; 32], ProgramError> {
-        if input.len() != 32 {
-            return Err(InvalidInstruction.into());
+    fn require_empty(input: &[u8]) -> Result<(), ProgramError> {
+        if input.is_empty() {
+            Ok(())
+        } else {
+            Err(InvalidInstruction.into())
         }
-
-        let mut randomness = [0u8; 32];
-        randomness.copy_from_slice(input);
-        Ok(randomness)
     }
 
     fn unpack_seeded_randomness(input: &[u8]) -> Result<([u8; 32], [u8; 32]), ProgramError> {
@@ -356,10 +392,7 @@ mod tests {
 
         let mut legacy_data = vec![91];
         legacy_data.extend_from_slice(&randomness);
-        assert_eq!(
-            RPSProgramInstruction::unpack(&legacy_data).unwrap(),
-            RPSProgramInstruction::LegacyDiceVrfCallback { randomness }
-        );
+        assert!(RPSProgramInstruction::unpack(&legacy_data).is_err());
     }
 
     #[test]
@@ -390,16 +423,55 @@ mod tests {
     }
 
     #[test]
-    fn raffle_vrf_callback_rejects_trailing_bytes() {
+    fn raffle_vrf_callback_requires_the_exact_request_seed() {
         let randomness = [17u8; 32];
+        let expected_vrf_seed = [19u8; 32];
         let mut data = vec![90];
         data.extend_from_slice(&randomness);
+        data.extend_from_slice(&expected_vrf_seed);
         assert_eq!(
             RPSProgramInstruction::unpack(&data).unwrap(),
-            RPSProgramInstruction::RaffleVrfCallback { randomness }
+            RPSProgramInstruction::RaffleVrfCallback {
+                expected_vrf_seed,
+                randomness,
+            }
         );
 
         data.push(0);
         assert!(RPSProgramInstruction::unpack(&data).is_err());
+        let mut legacy_data = vec![90];
+        legacy_data.extend_from_slice(&randomness);
+        assert!(RPSProgramInstruction::unpack(&legacy_data).is_err());
+    }
+
+    #[test]
+    fn vrf_retry_failure_and_refund_tags_are_exact() {
+        for (tag, expected) in [
+            (35, RPSProgramInstruction::RetryRaffleDraw),
+            (36, RPSProgramInstruction::MarkRaffleVrfFailed),
+            (37, RPSProgramInstruction::RefundFailedRaffleTicket),
+            (38, RPSProgramInstruction::RetryDiceDraw),
+            (39, RPSProgramInstruction::MarkDiceVrfFailed),
+            (40, RPSProgramInstruction::RefundFailedDiceGame),
+        ] {
+            assert_eq!(RPSProgramInstruction::unpack(&[tag]).unwrap(), expected);
+            assert!(RPSProgramInstruction::unpack(&[tag, 0]).is_err());
+        }
+
+        let round_id = 77u64;
+        assert_eq!(
+            RPSProgramInstruction::unpack(&round_instruction(41, round_id)).unwrap(),
+            RPSProgramInstruction::MarkRussianRouletteVrfFailed {
+                expected_round_id: round_id,
+            }
+        );
+        assert_eq!(
+            RPSProgramInstruction::unpack(&round_instruction(42, round_id)).unwrap(),
+            RPSProgramInstruction::RefundFailedRussianRouletteRound {
+                expected_round_id: round_id,
+            }
+        );
+        assert!(RPSProgramInstruction::unpack(&[41]).is_err());
+        assert!(RPSProgramInstruction::unpack(&[42]).is_err());
     }
 }

@@ -169,6 +169,9 @@ impl Init {
             unlucky_player_index: UNLUCKY_PLAYER_INDEX_NONE,
             vrf_seed: [0; 32],
             unlucky_player: [0; 32],
+            vrf_last_request_at: 0,
+            vrf_retry_count: 0,
+            settled_at: 0,
         };
 
         table.serialize(&mut &mut table_account.data.borrow_mut()[..])?;

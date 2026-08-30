@@ -122,6 +122,18 @@ pub enum RPSProgramError {
 
     #[error("payer does not match")] //38
     InvalidPayer,
+
+    #[error("VRF retry is not available yet")] //39
+    VrfRetryTooEarly,
+
+    #[error("all VRF retries have already been requested")] //40
+    VrfRetryLimitReached,
+
+    #[error("VRF failure cannot be declared yet")] //41
+    VrfFailureTooEarly,
+
+    #[error("VRF retries have not been exhausted")] //42
+    VrfRetriesNotExhausted,
 }
 
 impl From<RPSProgramError> for ProgramError {

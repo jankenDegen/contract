@@ -1,8 +1,8 @@
 use crate::{
     constants::{
         DICE_GAME_SPACE, DICE_MANAGER_SEED, DICE_PLAYER_COUNT, DICE_SEED, DICE_STATUS_DRAWN,
-        DICE_STATUS_OPEN, DICE_STATUS_PENDING, DICE_VRF_CALLBACK_TAG, DICE_VRF_SEED, MANAGER_SEED,
-        UNDRAWN_DICE_NO,
+        DICE_STATUS_OPEN, DICE_STATUS_PENDING, DICE_STATUS_VRF_FAILED, DICE_VRF_CALLBACK_TAG,
+        DICE_VRF_SEED, MANAGER_SEED, UNDRAWN_DICE_NO,
     },
     error::RPSProgramError::{
         ArithmeticError, DiceDrawAlreadyRequested, DiceDrawPending, DiceGameNotReady,
@@ -24,7 +24,7 @@ use solana_program::{
     pubkey::Pubkey,
     sysvar::{clock::Clock, Sysvar},
 };
-use solana_system_interface::instruction::transfer;
+use solana_system_interface::{instruction::transfer, program as system_program};
 
 pub struct Dice;
 impl Dice {
@@ -66,6 +66,13 @@ impl Dice {
             .stake
             .checked_mul(selected_count as u64)
             .ok_or(ArithmeticError)?;
+        let pot = init_dice
+            .stake
+            .checked_mul(DICE_PLAYER_COUNT as u64)
+            .ok_or(ArithmeticError)?;
+        if dice_manager.program_fee >= pot {
+            return Err(InvalidDiceConfiguration.into());
+        }
 
         invoke(
             &transfer(player.key, dice_account.key, total_stake),
@@ -98,6 +105,9 @@ impl Dice {
             winning_dice: UNDRAWN_DICE_NO,
             vrf_seed: [0; 32],
             winner: [0; 32],
+            program_fee: dice_manager.program_fee,
+            vrf_last_request_at: 0,
+            vrf_retry_count: 0,
         };
 
         dice.serialize(&mut &mut dice_account.data.borrow_mut()[..])?;
@@ -126,6 +136,7 @@ impl Dice {
         let selected_count = selected_dices.len() as u8;
 
         let mut dice = DiceGame::try_from_slice(&dice_account.data.borrow())?;
+        Self::validate_game_account(dice_account, &dice, program_id)?;
 
         if dice.draw_status != DICE_STATUS_OPEN || dice.number_of_players >= DICE_PLAYER_COUNT {
             return Err(InvalidGameState.into());
@@ -210,8 +221,8 @@ impl Dice {
             return Err(DiceDrawAlreadyRequested.into());
         }
 
-        let request_slot = Clock::get()?.slot;
-        let vrf_seed = Self::vrf_request_seed(dice_account.key, dice.game_id, request_slot);
+        let clock = Clock::get()?;
+        let vrf_seed = Self::vrf_request_seed(dice_account.key, dice.game_id, clock.slot);
         MagicBlockVrf::request_randomness(
             DICE_VRF_CALLBACK_TAG,
             &vrf_seed,
@@ -229,6 +240,8 @@ impl Dice {
         dice.draw_status = DICE_STATUS_PENDING;
         dice.winning_dice = UNDRAWN_DICE_NO;
         dice.vrf_seed = vrf_seed;
+        dice.vrf_last_request_at = clock.unix_timestamp;
+        dice.vrf_retry_count = 0;
         dice.serialize(&mut &mut dice_account.data.borrow_mut()[..])?;
 
         Ok(())
@@ -238,7 +251,6 @@ impl Dice {
         let accounts_iter: &mut std::slice::Iter<'_, AccountInfo<'_>> = &mut accounts.iter();
 
         let dice_account: &AccountInfo<'_> = next_account_info(accounts_iter)?;
-        let dice_manager_account: &AccountInfo<'_> = next_account_info(accounts_iter)?;
         let manager_account: &AccountInfo<'_> = next_account_info(accounts_iter)?;
         let initializer_account: &AccountInfo<'_> = next_account_info(accounts_iter)?;
         let player_2_account: &AccountInfo<'_> = next_account_info(accounts_iter)?;
@@ -251,9 +263,9 @@ impl Dice {
             return Err(InvalidGameAccount.into());
         }
 
-        let dice_manager = Self::load_dice_manager(dice_manager_account, program_id)?;
         let mut manager = Self::load_fee_manager(manager_account, program_id)?;
         let mut dice = DiceGame::try_from_slice(&dice_account.data.borrow())?;
+        Self::validate_game_account(dice_account, &dice, program_id)?;
 
         if dice.draw_status == DICE_STATUS_DRAWN {
             return Err(DiceDrawAlreadyRequested.into());
@@ -286,21 +298,19 @@ impl Dice {
             .checked_mul(DICE_PLAYER_COUNT as u64)
             .ok_or(ArithmeticError)?;
 
-        if dice_manager.program_fee >= pot {
+        if dice.program_fee >= pot {
             return Err(InvalidDiceConfiguration.into());
         }
 
-        let prize = pot
-            .checked_sub(dice_manager.program_fee)
-            .ok_or(ArithmeticError)?;
+        let prize = pot.checked_sub(dice.program_fee).ok_or(ArithmeticError)?;
 
         manager.collected_fee = manager
             .collected_fee
-            .checked_add(dice_manager.program_fee)
+            .checked_add(dice.program_fee)
             .ok_or(ArithmeticError)?;
 
-        **dice_account.try_borrow_mut_lamports()? -= dice_manager.program_fee;
-        **manager_account.try_borrow_mut_lamports()? += dice_manager.program_fee;
+        **dice_account.try_borrow_mut_lamports()? -= dice.program_fee;
+        **manager_account.try_borrow_mut_lamports()? += dice.program_fee;
 
         **dice_account.try_borrow_mut_lamports()? -= prize;
         **winner_account.try_borrow_mut_lamports()? += prize;
@@ -340,32 +350,19 @@ impl Dice {
         Ok(())
     }
 
-    pub fn consume_legacy_vrf_randomness(
-        accounts: &[AccountInfo],
-        program_id: &Pubkey,
-        randomness: [u8; 32],
-    ) -> ProgramResult {
-        Self::consume_vrf_randomness_inner(accounts, program_id, None, randomness)
-    }
-
     pub fn consume_vrf_randomness(
         accounts: &[AccountInfo],
         program_id: &Pubkey,
         expected_vrf_seed: [u8; 32],
         randomness: [u8; 32],
     ) -> ProgramResult {
-        Self::consume_vrf_randomness_inner(
-            accounts,
-            program_id,
-            Some(expected_vrf_seed),
-            randomness,
-        )
+        Self::consume_vrf_randomness_inner(accounts, program_id, expected_vrf_seed, randomness)
     }
 
     fn consume_vrf_randomness_inner(
         accounts: &[AccountInfo],
         program_id: &Pubkey,
-        expected_vrf_seed: Option<[u8; 32]>,
+        expected_vrf_seed: [u8; 32],
         randomness: [u8; 32],
     ) -> ProgramResult {
         let accounts_iter: &mut std::slice::Iter<'_, AccountInfo<'_>> = &mut accounts.iter();
@@ -380,15 +377,8 @@ impl Dice {
 
         let mut dice = DiceGame::try_from_slice(&dice_account.data.borrow())?;
         Self::validate_game_account(dice_account, &dice, program_id)?;
-        if dice.draw_status != DICE_STATUS_PENDING {
-            return Err(InvalidGameState.into());
-        }
-        if dice.winning_dice != UNDRAWN_DICE_NO {
-            return Err(DiceDrawAlreadyRequested.into());
-        }
-        let required_vrf_seed = expected_vrf_seed
-            .unwrap_or_else(|| Self::legacy_vrf_request_seed(dice_account.key, dice.game_id));
-        if dice.vrf_seed != required_vrf_seed {
+        Self::validate_unresolved_pending(&dice)?;
+        if dice.vrf_seed != expected_vrf_seed {
             return Err(InvalidGameState.into());
         }
 
@@ -406,6 +396,115 @@ impl Dice {
             winning_dice
         );
 
+        Ok(())
+    }
+
+    pub fn retry_draw(accounts: &[AccountInfo], program_id: &Pubkey) -> ProgramResult {
+        let accounts_iter = &mut accounts.iter();
+        let payer = next_account_info(accounts_iter)?;
+        let dice_account = next_account_info(accounts_iter)?;
+        let vrf_request_identity = next_account_info(accounts_iter)?;
+        let oracle_queue = next_account_info(accounts_iter)?;
+        let system_program_account = next_account_info(accounts_iter)?;
+        let slot_hashes_account = next_account_info(accounts_iter)?;
+        let vrf_program_account = next_account_info(accounts_iter)?;
+
+        if !payer.is_signer {
+            return Err(PlayerNotSigner.into());
+        }
+        if dice_account.owner != program_id {
+            return Err(InvalidGameAccount.into());
+        }
+        let mut dice = DiceGame::try_from_slice(&dice_account.data.borrow())?;
+        Self::validate_game_account(dice_account, &dice, program_id)?;
+        Self::validate_unresolved_pending(&dice)?;
+        let clock = Clock::get()?;
+        let next_retry_count = Utils::next_vrf_retry_count(dice.vrf_retry_count)?;
+        Utils::require_vrf_retry_delay(dice.vrf_last_request_at, clock.unix_timestamp)?;
+        let caller_seed = Self::retry_vrf_request_seed(
+            dice_account.key,
+            dice.game_id,
+            &dice.vrf_seed,
+            next_retry_count,
+            clock.slot,
+        );
+        MagicBlockVrf::request_randomness(
+            DICE_VRF_CALLBACK_TAG,
+            &dice.vrf_seed,
+            payer,
+            vrf_request_identity,
+            oracle_queue,
+            system_program_account,
+            slot_hashes_account,
+            vrf_program_account,
+            program_id,
+            dice_account,
+            caller_seed,
+        )?;
+
+        dice.vrf_retry_count = next_retry_count;
+        dice.vrf_last_request_at = clock.unix_timestamp;
+        dice.serialize(&mut &mut dice_account.data.borrow_mut()[..])?;
+        Ok(())
+    }
+
+    pub fn mark_vrf_failed(accounts: &[AccountInfo], program_id: &Pubkey) -> ProgramResult {
+        let dice_account = next_account_info(&mut accounts.iter())?;
+        if dice_account.owner != program_id {
+            return Err(InvalidGameAccount.into());
+        }
+        let mut dice = DiceGame::try_from_slice(&dice_account.data.borrow())?;
+        Self::validate_game_account(dice_account, &dice, program_id)?;
+        Self::validate_unresolved_pending(&dice)?;
+        Utils::require_vrf_failure_delay(
+            dice.vrf_retry_count,
+            dice.vrf_last_request_at,
+            Clock::get()?.unix_timestamp,
+        )?;
+
+        dice.draw_status = DICE_STATUS_VRF_FAILED;
+        dice.serialize(&mut &mut dice_account.data.borrow_mut()[..])?;
+        Ok(())
+    }
+
+    pub fn refund_failed_game(accounts: &[AccountInfo], program_id: &Pubkey) -> ProgramResult {
+        let accounts_iter = &mut accounts.iter();
+        let dice_account = next_account_info(accounts_iter)?;
+        let initializer_account = next_account_info(accounts_iter)?;
+        let player_2_account = next_account_info(accounts_iter)?;
+        let player_3_account = next_account_info(accounts_iter)?;
+        let player_4_account = next_account_info(accounts_iter)?;
+        let player_5_account = next_account_info(accounts_iter)?;
+        let player_6_account = next_account_info(accounts_iter)?;
+
+        if dice_account.owner != program_id {
+            return Err(InvalidGameAccount.into());
+        }
+        let dice = DiceGame::try_from_slice(&dice_account.data.borrow())?;
+        Self::validate_game_account(dice_account, &dice, program_id)?;
+        if dice.draw_status != DICE_STATUS_VRF_FAILED
+            || dice.number_of_players != DICE_PLAYER_COUNT
+            || dice.winning_dice != UNDRAWN_DICE_NO
+        {
+            return Err(InvalidGameState.into());
+        }
+        let player_accounts = [
+            initializer_account,
+            player_2_account,
+            player_3_account,
+            player_4_account,
+            player_5_account,
+            player_6_account,
+        ];
+        Self::validate_player_accounts(&dice, &player_accounts)?;
+        Self::settle_failed_refund(
+            dice_account,
+            initializer_account,
+            &player_accounts,
+            dice.stake,
+        )?;
+        dice_account.resize(0)?;
+        dice_account.assign(&system_program::ID);
         Ok(())
     }
 
@@ -519,11 +618,6 @@ impl Dice {
         Ok(())
     }
 
-    fn legacy_vrf_request_seed(dice_address: &Pubkey, game_id: u64) -> [u8; 32] {
-        let game_id_bytes = game_id.to_le_bytes();
-        hash(&[DICE_VRF_SEED, dice_address.as_ref(), &game_id_bytes].concat()).to_bytes()
-    }
-
     fn vrf_request_seed(dice_address: &Pubkey, game_id: u64, request_slot: u64) -> [u8; 32] {
         let game_id_bytes = game_id.to_le_bytes();
         let request_slot_bytes = request_slot.to_le_bytes();
@@ -537,6 +631,66 @@ impl Dice {
             .concat(),
         )
         .to_bytes()
+    }
+
+    fn retry_vrf_request_seed(
+        dice_address: &Pubkey,
+        game_id: u64,
+        stable_seed: &[u8; 32],
+        retry_count: u8,
+        request_slot: u64,
+    ) -> [u8; 32] {
+        hash(
+            &[
+                DICE_VRF_SEED,
+                b"retry",
+                dice_address.as_ref(),
+                &game_id.to_le_bytes(),
+                stable_seed,
+                &[retry_count],
+                &request_slot.to_le_bytes(),
+            ]
+            .concat(),
+        )
+        .to_bytes()
+    }
+
+    fn validate_unresolved_pending(dice: &DiceGame) -> ProgramResult {
+        if dice.draw_status != DICE_STATUS_PENDING {
+            return Err(InvalidGameState.into());
+        }
+        if dice.winning_dice != UNDRAWN_DICE_NO {
+            return Err(DiceDrawAlreadyRequested.into());
+        }
+        Ok(())
+    }
+
+    fn move_lamports(
+        source: &AccountInfo,
+        destination: &AccountInfo,
+        amount: u64,
+    ) -> ProgramResult {
+        let source_balance = **source.try_borrow_lamports()?;
+        let destination_balance = **destination.try_borrow_lamports()?;
+        **source.try_borrow_mut_lamports()? =
+            source_balance.checked_sub(amount).ok_or(ArithmeticError)?;
+        **destination.try_borrow_mut_lamports()? = destination_balance
+            .checked_add(amount)
+            .ok_or(ArithmeticError)?;
+        Ok(())
+    }
+
+    fn settle_failed_refund(
+        dice_account: &AccountInfo,
+        initializer_account: &AccountInfo,
+        player_accounts: &[&AccountInfo; 6],
+        stake: u64,
+    ) -> ProgramResult {
+        for account in player_accounts {
+            Self::move_lamports(dice_account, account, stake)?;
+        }
+        let rent_and_dust = **dice_account.try_borrow_lamports()?;
+        Self::move_lamports(dice_account, initializer_account, rent_and_dust)
     }
 
     fn winning_dice(randomness: &[u8; 32]) -> u8 {
@@ -570,6 +724,9 @@ mod tests {
             winning_dice: UNDRAWN_DICE_NO,
             vrf_seed: [0; 32],
             winner: [0; 32],
+            program_fee: 3_000_000,
+            vrf_last_request_at: 1_000,
+            vrf_retry_count: 0,
         }
     }
 
@@ -584,16 +741,16 @@ mod tests {
     }
 
     #[test]
-    fn legacy_callbacks_cannot_match_new_slot_bound_requests() {
-        let program_id = Pubkey::new_unique();
-        let game_id: u64 = 42;
-        let game_id_bytes = game_id.to_le_bytes();
-        let dice_address =
-            Pubkey::find_program_address(&[DICE_SEED, &game_id_bytes], &program_id).0;
-        let legacy_seed = Dice::legacy_vrf_request_seed(&dice_address, game_id);
-        let new_seed = Dice::vrf_request_seed(&dice_address, game_id, 1_000);
+    fn retry_seeds_are_unique_but_keep_the_stable_callback_seed() {
+        let dice_address = Pubkey::new_unique();
+        let game_id = 42;
+        let stable_seed = Dice::vrf_request_seed(&dice_address, game_id, 1_000);
+        let first = Dice::retry_vrf_request_seed(&dice_address, game_id, &stable_seed, 1, 2_000);
+        let second = Dice::retry_vrf_request_seed(&dice_address, game_id, &stable_seed, 2, 2_300);
 
-        assert_ne!(legacy_seed, new_seed);
+        assert_ne!(first, second);
+        assert_ne!(first, stable_seed);
+        assert_ne!(second, stable_seed);
     }
 
     #[test]
@@ -632,5 +789,121 @@ mod tests {
             Dice::validate_game_account(&wrong_account, &game, &program_id).unwrap_err(),
             ProgramError::from(InvalidGameAccount)
         );
+    }
+
+    #[test]
+    fn callback_and_failure_marker_share_the_same_unresolved_pending_gate() {
+        let mut game = game(42);
+
+        assert!(Dice::validate_unresolved_pending(&game).is_ok());
+
+        // A callback that has already stored a result prevents failure marking.
+        game.winning_dice = 4;
+        assert!(Dice::validate_unresolved_pending(&game).is_err());
+
+        // A failure marker that wins the race prevents a late callback.
+        game.winning_dice = UNDRAWN_DICE_NO;
+        game.draw_status = DICE_STATUS_VRF_FAILED;
+        assert!(Dice::validate_unresolved_pending(&game).is_err());
+    }
+
+    #[test]
+    fn failed_refund_returns_one_stake_per_face_even_with_duplicate_players() {
+        let program_id = Pubkey::new_unique();
+        let system_owner = system_program::ID;
+        let dice_key = Pubkey::new_unique();
+        let shared_key = Pubkey::new_unique();
+        let player_3_key = Pubkey::new_unique();
+        let player_4_key = Pubkey::new_unique();
+        let player_5_key = Pubkey::new_unique();
+        let player_6_key = Pubkey::new_unique();
+        let stake = 100u64;
+        let rent = 37u64;
+        let mut dice_lamports = stake * 6 + rent;
+        let mut shared_lamports = 10;
+        let mut player_3_lamports = 10;
+        let mut player_4_lamports = 10;
+        let mut player_5_lamports = 10;
+        let mut player_6_lamports = 10;
+        let mut dice_data = [];
+        let mut shared_data = [];
+        let mut player_3_data = [];
+        let mut player_4_data = [];
+        let mut player_5_data = [];
+        let mut player_6_data = [];
+        let dice_account = AccountInfo::new(
+            &dice_key,
+            false,
+            true,
+            &mut dice_lamports,
+            &mut dice_data,
+            &program_id,
+            false,
+        );
+        let shared_player = AccountInfo::new(
+            &shared_key,
+            false,
+            true,
+            &mut shared_lamports,
+            &mut shared_data,
+            &system_owner,
+            false,
+        );
+        let duplicate_shared_player = shared_player.clone();
+        let player_3 = AccountInfo::new(
+            &player_3_key,
+            false,
+            true,
+            &mut player_3_lamports,
+            &mut player_3_data,
+            &system_owner,
+            false,
+        );
+        let player_4 = AccountInfo::new(
+            &player_4_key,
+            false,
+            true,
+            &mut player_4_lamports,
+            &mut player_4_data,
+            &system_owner,
+            false,
+        );
+        let player_5 = AccountInfo::new(
+            &player_5_key,
+            false,
+            true,
+            &mut player_5_lamports,
+            &mut player_5_data,
+            &system_owner,
+            false,
+        );
+        let player_6 = AccountInfo::new(
+            &player_6_key,
+            false,
+            true,
+            &mut player_6_lamports,
+            &mut player_6_data,
+            &system_owner,
+            false,
+        );
+        let players = [
+            &shared_player,
+            &duplicate_shared_player,
+            &player_3,
+            &player_4,
+            &player_5,
+            &player_6,
+        ];
+
+        Dice::settle_failed_refund(&dice_account, &shared_player, &players, stake).unwrap();
+
+        assert_eq!(**dice_account.try_borrow_lamports().unwrap(), 0);
+        assert_eq!(
+            **shared_player.try_borrow_lamports().unwrap(),
+            10 + stake * 2 + rent
+        );
+        for player in [&player_3, &player_4, &player_5, &player_6] {
+            assert_eq!(**player.try_borrow_lamports().unwrap(), 10 + stake);
+        }
     }
 }

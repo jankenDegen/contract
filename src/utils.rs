@@ -1,14 +1,25 @@
 use borsh::BorshDeserialize;
 use solana_program::{
-    account_info::AccountInfo, entrypoint::ProgramResult, program::invoke_signed,
-    program_error::ProgramError, pubkey::Pubkey, rent::Rent, sysvar::Sysvar,
+    account_info::AccountInfo,
+    entrypoint::ProgramResult,
+    program::{invoke, invoke_signed},
+    program_error::ProgramError,
+    pubkey::Pubkey,
+    rent::Rent,
+    sysvar::Sysvar,
 };
-use solana_system_interface::{instruction::create_account, program as system_program};
+use solana_system_interface::{
+    instruction::{create_account, transfer},
+    program as system_program,
+};
 
 use crate::state::Config;
 
+use crate::constants::{VRF_MAX_RETRIES, VRF_RETRY_DELAY_SECONDS};
 use crate::error::RPSProgramError::{
-    AccountAlreadyInitialized, InvalidAuth, InvalidConfig, InvalidDerivedAccount, NotSignerAuth,
+    AccountAlreadyInitialized, ArithmeticError, InvalidAuth, InvalidConfig, InvalidDerivedAccount,
+    InvalidPayer, NotSignerAuth, VrfFailureTooEarly, VrfRetriesNotExhausted, VrfRetryLimitReached,
+    VrfRetryTooEarly,
 };
 
 pub struct Utils;
@@ -73,7 +84,7 @@ impl Utils {
             return Err(InvalidDerivedAccount.into());
         }
 
-        if **pda.try_borrow_lamports()? != 0 {
+        if pda.owner != &system_program::ID || pda.executable || !pda.data_is_empty() {
             return Err(AccountAlreadyInitialized.into());
         }
 
@@ -82,6 +93,15 @@ impl Utils {
         let mut signer_seeds: Vec<&[u8]> = seeds.to_vec();
         signer_seeds.push(&bump_seed);
 
+        let prefunded_lamports = **pda.try_borrow_lamports()?;
+        if prefunded_lamports != 0 {
+            invoke_signed(
+                &transfer(pda.key, payer.key, prefunded_lamports),
+                &[pda.clone(), payer.clone(), system_program_account.clone()],
+                &[signer_seeds.as_slice()],
+            )?;
+        }
+
         invoke_signed(
             &create_ix,
             &[payer.clone(), pda.clone(), system_program_account.clone()],
@@ -89,5 +109,107 @@ impl Utils {
         )?;
 
         Ok(bump)
+    }
+
+    pub fn ensure_account_space<'a>(
+        payer: &AccountInfo<'a>,
+        account: &AccountInfo<'a>,
+        system_program_account: &AccountInfo<'a>,
+        new_space: usize,
+        escrow_liability: u64,
+    ) -> ProgramResult {
+        if account.data_len() >= new_space {
+            return Ok(());
+        }
+        if !payer.is_signer {
+            return Err(InvalidPayer.into());
+        }
+        if system_program_account.key != &system_program::ID {
+            return Err(InvalidDerivedAccount.into());
+        }
+
+        let current_lamports = **account.try_borrow_lamports()?;
+        let rent_reserve = current_lamports
+            .checked_sub(escrow_liability)
+            .ok_or(ArithmeticError)?;
+        let required_rent = Rent::get()?.minimum_balance(new_space);
+        let top_up = required_rent.saturating_sub(rent_reserve);
+
+        if top_up != 0 {
+            invoke(
+                &transfer(payer.key, account.key, top_up),
+                &[
+                    payer.clone(),
+                    account.clone(),
+                    system_program_account.clone(),
+                ],
+            )?;
+        }
+
+        account.resize(new_space)
+    }
+
+    pub fn next_vrf_retry_count(current: u8) -> Result<u8, ProgramError> {
+        if current >= VRF_MAX_RETRIES {
+            return Err(VrfRetryLimitReached.into());
+        }
+        current.checked_add(1).ok_or(ArithmeticError.into())
+    }
+
+    pub fn require_vrf_retry_delay(last_request_at: i64, now: i64) -> ProgramResult {
+        let retry_at = last_request_at
+            .checked_add(VRF_RETRY_DELAY_SECONDS)
+            .ok_or(ArithmeticError)?;
+        if now < retry_at {
+            return Err(VrfRetryTooEarly.into());
+        }
+        Ok(())
+    }
+
+    pub fn require_vrf_failure_delay(
+        retry_count: u8,
+        last_request_at: i64,
+        now: i64,
+    ) -> ProgramResult {
+        if retry_count != VRF_MAX_RETRIES {
+            return Err(VrfRetriesNotExhausted.into());
+        }
+        let failure_at = last_request_at
+            .checked_add(VRF_RETRY_DELAY_SECONDS)
+            .ok_or(ArithmeticError)?;
+        if now < failure_at {
+            return Err(VrfFailureTooEarly.into());
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn vrf_retry_sequence_enforces_two_spaced_retries_then_failure() {
+        assert_eq!(Utils::next_vrf_retry_count(0).unwrap(), 1);
+        assert_eq!(Utils::next_vrf_retry_count(1).unwrap(), 2);
+        assert_eq!(
+            Utils::next_vrf_retry_count(2).unwrap_err(),
+            ProgramError::from(VrfRetryLimitReached)
+        );
+
+        assert_eq!(
+            Utils::require_vrf_retry_delay(1_000, 1_119).unwrap_err(),
+            ProgramError::from(VrfRetryTooEarly)
+        );
+        assert!(Utils::require_vrf_retry_delay(1_000, 1_120).is_ok());
+        assert_eq!(
+            Utils::require_vrf_failure_delay(1, 1_000, 1_120).unwrap_err(),
+            ProgramError::from(VrfRetriesNotExhausted)
+        );
+        assert_eq!(
+            Utils::require_vrf_failure_delay(2, 1_000, 1_119).unwrap_err(),
+            ProgramError::from(VrfFailureTooEarly)
+        );
+        assert!(Utils::require_vrf_failure_delay(2, 1_000, 1_120).is_ok());
     }
 }

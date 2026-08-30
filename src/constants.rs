@@ -2,12 +2,19 @@ pub const GAME_SPACE: u64 = 124;
 pub const MANAGER_SPACE: u64 = 27;
 pub const CONFIG_SPACE: u64 = 161;
 pub const TICKET_SPACE: u64 = 69;
-pub const RAFFLE_SPACE: u64 = 179;
+pub const LEGACY_RAFFLE_SPACE: u64 = 179;
+pub const RAFFLE_SPACE: u64 = 188;
 pub const RAFFLE_MANAGER_SPACE: u64 = 45;
 pub const DICE_MANAGER_SPACE: u64 = 17;
-pub const DICE_GAME_SPACE: u64 = 281;
+pub const LEGACY_DICE_GAME_SPACE: u64 = 281;
+pub const DICE_GAME_SPACE: u64 = 298;
 pub const RUSSIAN_ROULETTE_MANAGER_SPACE: u64 = 17;
-pub const RUSSIAN_ROULETTE_GAME_SPACE: u64 = 284;
+pub const LEGACY_RUSSIAN_ROULETTE_GAME_SPACE: u64 = 284;
+pub const RUSSIAN_ROULETTE_GAME_SPACE: u64 = 301;
+
+pub const VRF_RETRY_DELAY_SECONDS: i64 = 120;
+pub const VRF_MAX_RETRIES: u8 = 2;
+pub const RUSSIAN_ROULETTE_RESULT_RETENTION_SECONDS: i64 = 120;
 
 pub const GAME_SEED: &[u8] = b"game";
 pub const MANAGER_SEED: &[u8] = b"manager";
@@ -30,6 +37,7 @@ pub const RUSSIAN_ROULETTE_VRF_CALLBACK_TAG: u8 = 92;
 pub const RAFFLE_STATUS_OPEN: u8 = 0;
 pub const RAFFLE_STATUS_PENDING: u8 = 1;
 pub const RAFFLE_STATUS_DRAWN: u8 = 2;
+pub const RAFFLE_STATUS_VRF_FAILED: u8 = 3;
 
 pub const RAFFLE_TICKET_COUNT: u8 = 100;
 pub const UNDRAWN_TICKET_NO: u8 = u8::MAX;
@@ -38,6 +46,7 @@ pub const DICE_PLAYER_COUNT: u8 = 6;
 pub const DICE_STATUS_OPEN: u8 = 0;
 pub const DICE_STATUS_PENDING: u8 = 1;
 pub const DICE_STATUS_DRAWN: u8 = 2;
+pub const DICE_STATUS_VRF_FAILED: u8 = 3;
 pub const UNDRAWN_DICE_NO: u8 = 0;
 
 pub const RUSSIAN_ROULETTE_PLAYER_COUNT: u8 = 6;
@@ -53,4 +62,5 @@ pub const RUSSIAN_ROULETTE_PARTICIPATION_FEE: u64 = RUSSIAN_ROULETTE_DEFAULT_PAR
 pub const RUSSIAN_ROULETTE_STATUS_OPEN: u8 = 0;
 pub const RUSSIAN_ROULETTE_STATUS_PENDING: u8 = 1;
 pub const RUSSIAN_ROULETTE_STATUS_DRAWN: u8 = 2;
+pub const RUSSIAN_ROULETTE_STATUS_VRF_FAILED: u8 = 3;
 pub const UNLUCKY_PLAYER_INDEX_NONE: u8 = u8::MAX;
