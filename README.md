@@ -182,10 +182,10 @@ Integer seed components use little-endian byte order.
 | Raffle manager | `[b"rafflemanager"]` | 45 bytes |
 | Dice manager | `[b"dicemanager"]` | 17 bytes |
 | Janken game | `[b"game", commitment_hash]` | 124 bytes |
-| Raffle | `[b"raffle", raffle_no_le]` | 188 bytes (legacy: 179) |
+| Raffle | `[b"raffle", raffle_no_le]` | 188 bytes |
 | Ticket | `[b"ticket", ticket_no, b"raffle", raffle_no_le]` | 69 bytes |
-| Dice game | `[b"dice", game_id_le]` | 298 bytes (legacy: 281) |
-| Roulette table | `[b"russianroulette", table_id]` | 301 bytes (legacy: 284) |
+| Dice game | `[b"dice", game_id_le]` | 298 bytes |
+| Roulette table | `[b"russianroulette", table_id]` | 301 bytes |
 
 ## Account State
 
@@ -213,20 +213,13 @@ Raffle, dice, and roulette draw statuses use:
 | 2 | Drawn |
 | 3 | VRF failed |
 
-The V2 layouts preserve every V1 byte and append little-endian fields:
+The VRF account layouts store retry and settlement metadata at these offsets:
 
-| Account | Appended V2 fields and offsets |
+| Account | Fields and offsets |
 | --- | --- |
 | Raffle | `vrf_last_request_at: i64` at 179; `vrf_retry_count: u8` at 187 |
 | Dice | `program_fee: u64` at 281; `vrf_last_request_at: i64` at 289; `vrf_retry_count: u8` at 297 |
 | Roulette | `vrf_last_request_at: i64` at 284; `vrf_retry_count: u8` at 292; `settled_at: i64` at 293 |
-
-Existing 179-byte raffles and 284-byte roulette tables are decoded as V1 and
-are expanded lazily when a payer next buys/joins or requests/retries VRF. The
-rent top-up calculation preserves all ticket or seat escrow. New dice games
-use the 298-byte V2 layout; legacy 281-byte drawn dice accounts remain
-decodable for permissionless rent recovery, but active legacy dice games are
-not migrated.
 
 Janken game state uses `1` for waiting for a guest and `2` for waiting for the
 initializer's reveal.
@@ -431,8 +424,8 @@ Vrf1RNUjXmQGjmQrQLvJHs9SNkvDJEsRVFPkfSQUwGz
 Requests accept either the default queue or the default ephemeral queue.
 Raffle, dice, and roulette bind authenticated callback arguments to the stable
 request seed; roulette also binds the round ID. Tags 90 and 91 require exactly
-64 payload bytes after the tag, and tag 92 requires exactly 72. There is no
-unseeded legacy callback form. Initial request seeds include the game PDA and
+64 payload bytes after the tag, and tag 92 requires exactly 72. Unseeded
+callback payloads are rejected. Initial request seeds include the game PDA and
 request slot, and every callback validates the canonical game PDA before
 accepting randomness. Callback instructions can only be invoked by the signer
 identity PDA derived under the VRF program for this program ID.
@@ -537,8 +530,8 @@ The Rust unit tests currently cover:
 
 - Exact instruction payloads, round/seed callback binding, and rejection of
   unseeded callbacks
-- Exact 179/188, 281/298, and 284/301 V1/V2 Borsh layouts and zero-default
-  compatibility
+- Exact 188-byte raffle, 298-byte dice, and 301-byte roulette Borsh layouts,
+  including rejection of truncated account data
 - Two 120-second retries followed by the final 120-second failure gate
 - Callback-versus-failure mutual exclusion for all three VRF games
 - Raffle winner selection and per-ticket failed-refund accounting
