@@ -55,14 +55,6 @@ impl Processor {
                 Admin::set_dice_manager(accounts, program_id, new_manager)
             }
             RPSProgramInstruction::InitDiceManager => Init::init_dice_manager(accounts, program_id),
-            RPSProgramInstruction::CreateDiceGame { init_dice } => {
-                Dice::create_game(accounts, program_id, init_dice)
-            }
-            RPSProgramInstruction::JoinDiceGame { join_dice } => {
-                Dice::join_game(accounts, program_id, join_dice)
-            }
-            RPSProgramInstruction::RequestDiceDraw => Dice::request_draw(accounts, program_id),
-            RPSProgramInstruction::FinalizeDiceDraw => Dice::finalize_draw(accounts, program_id),
             RPSProgramInstruction::DiceVrfCallback {
                 expected_vrf_seed,
                 randomness,
@@ -116,17 +108,66 @@ impl Processor {
             RPSProgramInstruction::RefundFailedRaffleTicket => {
                 Raffle::refund_failed_ticket(accounts, program_id)
             }
-            RPSProgramInstruction::RetryDiceDraw => Dice::retry_draw(accounts, program_id),
-            RPSProgramInstruction::MarkDiceVrfFailed => Dice::mark_vrf_failed(accounts, program_id),
-            RPSProgramInstruction::RefundFailedDiceGame => {
-                Dice::refund_failed_game(accounts, program_id)
-            }
             RPSProgramInstruction::MarkRussianRouletteVrfFailed { expected_round_id } => {
                 RussianRoulette::mark_vrf_failed(accounts, program_id, expected_round_id)
             }
             RPSProgramInstruction::RefundFailedRussianRouletteRound { expected_round_id } => {
                 RussianRoulette::refund_failed_round(accounts, program_id, expected_round_id)
             }
+            RPSProgramInstruction::CreateDiceGame { init_dice } => {
+                Dice::create_game(accounts, program_id, init_dice)
+            }
+            RPSProgramInstruction::JoinDiceGame { join_dice } => {
+                Dice::join_game(accounts, program_id, join_dice)
+            }
+            RPSProgramInstruction::RequestDiceDraw {
+                expected_generation_nonce,
+            } => Dice::request_draw(accounts, program_id, expected_generation_nonce),
+            RPSProgramInstruction::FinalizeDiceDraw {
+                expected_generation_nonce,
+            } => Dice::finalize_draw(accounts, program_id, expected_generation_nonce),
+            RPSProgramInstruction::RetryDiceDraw {
+                expected_generation_nonce,
+            } => Dice::retry_draw(accounts, program_id, expected_generation_nonce),
+            RPSProgramInstruction::MarkDiceVrfFailed {
+                expected_generation_nonce,
+            } => Dice::mark_vrf_failed(accounts, program_id, expected_generation_nonce),
+            RPSProgramInstruction::RefundFailedDiceGame {
+                expected_generation_nonce,
+            } => Dice::refund_failed_game(accounts, program_id, expected_generation_nonce),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        error::RPSProgramError::{DiceGenerationNonceRequired, InvalidInstruction},
+        state::InitDice,
+    };
+    use borsh::BorshSerialize;
+    use solana_program::program_error::ProgramError;
+
+    #[test]
+    fn processor_rejects_obsolete_dice_create_and_zero_generation_nonce() {
+        let program_id = Pubkey::new_unique();
+        let init = InitDice {
+            chosen_dices: [1, 0, 0, 0, 0, 0],
+            game_id: 7,
+            stake: 10_000_000,
+            generation_entropy: [0; 32],
+        };
+        assert_eq!(
+            Processor::process(&program_id, &[], &[20]).unwrap_err(),
+            ProgramError::from(InvalidInstruction)
+        );
+
+        let mut create_data = vec![43];
+        init.serialize(&mut create_data).unwrap();
+        assert_eq!(
+            Processor::process(&program_id, &[], &create_data).unwrap_err(),
+            ProgramError::from(DiceGenerationNonceRequired)
+        );
     }
 }

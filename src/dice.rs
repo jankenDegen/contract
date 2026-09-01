@@ -6,6 +6,7 @@ use crate::{
     },
     error::RPSProgramError::{
         ArithmeticError, DiceDrawAlreadyRequested, DiceDrawPending, DiceGameNotReady,
+        DiceGenerationNonceMismatch, DiceGenerationNonceRequired, DiceGenerationNotMature,
         InvalidChosenDice, InvalidDiceConfiguration, InvalidGameAccount, InvalidGameState,
         InvalidManager, InvalidPlayer, MinStake, PlayerNotSigner,
     },
@@ -27,12 +28,14 @@ use solana_program::{
 use solana_system_interface::{instruction::transfer, program as system_program};
 
 pub struct Dice;
+
 impl Dice {
     pub fn create_game(
         accounts: &[AccountInfo],
         program_id: &Pubkey,
         init_dice: InitDice,
     ) -> ProgramResult {
+        Self::require_nonzero_generation_nonce(&init_dice.generation_entropy)?;
         let accounts_iter: &mut std::slice::Iter<'_, AccountInfo<'_>> = &mut accounts.iter();
 
         let player: &AccountInfo<'_> = next_account_info(accounts_iter)?;
@@ -74,6 +77,19 @@ impl Dice {
             return Err(InvalidDiceConfiguration.into());
         }
 
+        // The caller supplies entropy, but the contract stores a token that
+        // also embeds the authoritative creation slot. A later generation can
+        // therefore never copy an earlier public token, even if its creator
+        // deliberately reuses the same entropy.
+        let generation_token = Self::generation_token(
+            dice_account.key,
+            init_dice.game_id,
+            player.key,
+            init_dice.stake,
+            &init_dice.generation_entropy,
+            Clock::get()?.slot,
+        );
+
         invoke(
             &transfer(player.key, dice_account.key, total_stake),
             &[
@@ -83,32 +99,13 @@ impl Dice {
             ],
         )?;
 
-        let mut chosen_dices = [0u8; 6];
-        let mut players = [[0u8; 32]; 6];
-        for (index, chosen_dice) in selected_dices.iter().enumerate() {
-            chosen_dices[index] = *chosen_dice;
-            players[index] = player.key.to_bytes();
-        }
-
-        let dice = DiceGame {
-            game_id: init_dice.game_id,
-            number_of_players: selected_count,
-            stake: init_dice.stake,
-            initializer: players[0],
-            player_2: players[1],
-            player_3: players[2],
-            player_4: players[3],
-            player_5: players[4],
-            player_6: players[5],
-            chosen_dices,
-            draw_status: DICE_STATUS_OPEN,
-            winning_dice: UNDRAWN_DICE_NO,
-            vrf_seed: [0; 32],
-            winner: [0; 32],
-            program_fee: dice_manager.program_fee,
-            vrf_last_request_at: 0,
-            vrf_retry_count: 0,
-        };
+        let dice = Self::new_game_state(
+            init_dice,
+            &selected_dices,
+            player.key,
+            dice_manager.program_fee,
+            generation_token,
+        );
 
         dice.serialize(&mut &mut dice_account.data.borrow_mut()[..])?;
 
@@ -120,6 +117,7 @@ impl Dice {
         program_id: &Pubkey,
         join_dice: JoinDice,
     ) -> ProgramResult {
+        Self::require_nonzero_generation_nonce(&join_dice.expected_generation_nonce)?;
         let accounts_iter: &mut std::slice::Iter<'_, AccountInfo<'_>> = &mut accounts.iter();
 
         let player: &AccountInfo<'_> = next_account_info(accounts_iter)?;
@@ -137,6 +135,7 @@ impl Dice {
 
         let mut dice = DiceGame::try_from_slice(&dice_account.data.borrow())?;
         Self::validate_game_account(dice_account, &dice, program_id)?;
+        Self::validate_generation(&dice, &join_dice.expected_generation_nonce)?;
 
         if dice.draw_status != DICE_STATUS_OPEN || dice.number_of_players >= DICE_PLAYER_COUNT {
             return Err(InvalidGameState.into());
@@ -194,7 +193,12 @@ impl Dice {
         Ok(())
     }
 
-    pub fn request_draw(accounts: &[AccountInfo], program_id: &Pubkey) -> ProgramResult {
+    pub fn request_draw(
+        accounts: &[AccountInfo],
+        program_id: &Pubkey,
+        expected_generation_nonce: [u8; 32],
+    ) -> ProgramResult {
+        Self::require_nonzero_generation_nonce(&expected_generation_nonce)?;
         let accounts_iter: &mut std::slice::Iter<'_, AccountInfo<'_>> = &mut accounts.iter();
 
         let payer: &AccountInfo<'_> = next_account_info(accounts_iter)?;
@@ -214,6 +218,7 @@ impl Dice {
 
         let mut dice = DiceGame::try_from_slice(&dice_account.data.borrow())?;
         Self::validate_game_account(dice_account, &dice, program_id)?;
+        Self::validate_generation(&dice, &expected_generation_nonce)?;
         if dice.number_of_players != DICE_PLAYER_COUNT {
             return Err(DiceGameNotReady.into());
         }
@@ -222,7 +227,13 @@ impl Dice {
         }
 
         let clock = Clock::get()?;
-        let vrf_seed = Self::vrf_request_seed(dice_account.key, dice.game_id, clock.slot);
+        Self::require_generation_mature(&expected_generation_nonce, clock.slot)?;
+        let vrf_seed = Self::vrf_request_seed(
+            dice_account.key,
+            dice.game_id,
+            &expected_generation_nonce,
+            clock.slot,
+        );
         MagicBlockVrf::request_randomness(
             DICE_VRF_CALLBACK_TAG,
             &vrf_seed,
@@ -247,7 +258,12 @@ impl Dice {
         Ok(())
     }
 
-    pub fn finalize_draw(accounts: &[AccountInfo], program_id: &Pubkey) -> ProgramResult {
+    pub fn finalize_draw(
+        accounts: &[AccountInfo],
+        program_id: &Pubkey,
+        expected_generation_nonce: [u8; 32],
+    ) -> ProgramResult {
+        Self::require_nonzero_generation_nonce(&expected_generation_nonce)?;
         let accounts_iter: &mut std::slice::Iter<'_, AccountInfo<'_>> = &mut accounts.iter();
 
         let dice_account: &AccountInfo<'_> = next_account_info(accounts_iter)?;
@@ -264,8 +280,9 @@ impl Dice {
         }
 
         let mut manager = Self::load_fee_manager(manager_account, program_id)?;
-        let mut dice = DiceGame::try_from_slice(&dice_account.data.borrow())?;
+        let dice = DiceGame::try_from_slice(&dice_account.data.borrow())?;
         Self::validate_game_account(dice_account, &dice, program_id)?;
+        Self::validate_generation(&dice, &expected_generation_nonce)?;
 
         if dice.draw_status == DICE_STATUS_DRAWN {
             return Err(DiceDrawAlreadyRequested.into());
@@ -315,10 +332,6 @@ impl Dice {
         **dice_account.try_borrow_mut_lamports()? -= prize;
         **winner_account.try_borrow_mut_lamports()? += prize;
 
-        dice.draw_status = DICE_STATUS_DRAWN;
-        dice.winner = winner_account.key.to_bytes();
-
-        dice.serialize(&mut &mut dice_account.data.borrow_mut()[..])?;
         manager.serialize(&mut &mut manager_account.data.borrow_mut()[..])?;
 
         msg!(
@@ -346,6 +359,15 @@ impl Dice {
                 payout
             );
         }
+
+        // A successful Dice generation has no remaining on-chain purpose once
+        // its result and payouts are committed. Return the rent/dust to the
+        // initializer and deallocate the PDA in this same instruction so a raw
+        // finalize call cannot leave permanent terminal state behind.
+        let rent_and_dust = **dice_account.try_borrow_lamports()?;
+        Self::move_lamports(dice_account, initializer_account, rent_and_dust)?;
+        dice_account.resize(0)?;
+        dice_account.assign(&system_program::ID);
 
         Ok(())
     }
@@ -399,7 +421,12 @@ impl Dice {
         Ok(())
     }
 
-    pub fn retry_draw(accounts: &[AccountInfo], program_id: &Pubkey) -> ProgramResult {
+    pub fn retry_draw(
+        accounts: &[AccountInfo],
+        program_id: &Pubkey,
+        expected_generation_nonce: [u8; 32],
+    ) -> ProgramResult {
+        Self::require_nonzero_generation_nonce(&expected_generation_nonce)?;
         let accounts_iter = &mut accounts.iter();
         let payer = next_account_info(accounts_iter)?;
         let dice_account = next_account_info(accounts_iter)?;
@@ -417,6 +444,7 @@ impl Dice {
         }
         let mut dice = DiceGame::try_from_slice(&dice_account.data.borrow())?;
         Self::validate_game_account(dice_account, &dice, program_id)?;
+        Self::validate_generation(&dice, &expected_generation_nonce)?;
         Self::validate_unresolved_pending(&dice)?;
         let clock = Clock::get()?;
         let next_retry_count = Utils::next_vrf_retry_count(dice.vrf_retry_count)?;
@@ -448,13 +476,19 @@ impl Dice {
         Ok(())
     }
 
-    pub fn mark_vrf_failed(accounts: &[AccountInfo], program_id: &Pubkey) -> ProgramResult {
+    pub fn mark_vrf_failed(
+        accounts: &[AccountInfo],
+        program_id: &Pubkey,
+        expected_generation_nonce: [u8; 32],
+    ) -> ProgramResult {
+        Self::require_nonzero_generation_nonce(&expected_generation_nonce)?;
         let dice_account = next_account_info(&mut accounts.iter())?;
         if dice_account.owner != program_id {
             return Err(InvalidGameAccount.into());
         }
         let mut dice = DiceGame::try_from_slice(&dice_account.data.borrow())?;
         Self::validate_game_account(dice_account, &dice, program_id)?;
+        Self::validate_generation(&dice, &expected_generation_nonce)?;
         Self::validate_unresolved_pending(&dice)?;
         Utils::require_vrf_failure_delay(
             dice.vrf_retry_count,
@@ -467,7 +501,12 @@ impl Dice {
         Ok(())
     }
 
-    pub fn refund_failed_game(accounts: &[AccountInfo], program_id: &Pubkey) -> ProgramResult {
+    pub fn refund_failed_game(
+        accounts: &[AccountInfo],
+        program_id: &Pubkey,
+        expected_generation_nonce: [u8; 32],
+    ) -> ProgramResult {
+        Self::require_nonzero_generation_nonce(&expected_generation_nonce)?;
         let accounts_iter = &mut accounts.iter();
         let dice_account = next_account_info(accounts_iter)?;
         let initializer_account = next_account_info(accounts_iter)?;
@@ -482,6 +521,7 @@ impl Dice {
         }
         let dice = DiceGame::try_from_slice(&dice_account.data.borrow())?;
         Self::validate_game_account(dice_account, &dice, program_id)?;
+        Self::validate_generation(&dice, &expected_generation_nonce)?;
         if dice.draw_status != DICE_STATUS_VRF_FAILED
             || dice.number_of_players != DICE_PLAYER_COUNT
             || dice.winning_dice != UNDRAWN_DICE_NO
@@ -505,6 +545,94 @@ impl Dice {
         )?;
         dice_account.resize(0)?;
         dice_account.assign(&system_program::ID);
+        Ok(())
+    }
+
+    fn new_game_state(
+        init_dice: InitDice,
+        selected_dices: &[u8],
+        player: &Pubkey,
+        program_fee: u64,
+        generation_nonce: [u8; 32],
+    ) -> DiceGame {
+        let mut chosen_dices = [0u8; 6];
+        let mut players = [[0u8; 32]; 6];
+        for (index, chosen_dice) in selected_dices.iter().enumerate() {
+            chosen_dices[index] = *chosen_dice;
+            players[index] = player.to_bytes();
+        }
+
+        DiceGame {
+            game_id: init_dice.game_id,
+            number_of_players: selected_dices.len() as u8,
+            stake: init_dice.stake,
+            initializer: players[0],
+            player_2: players[1],
+            player_3: players[2],
+            player_4: players[3],
+            player_5: players[4],
+            player_6: players[5],
+            chosen_dices,
+            draw_status: DICE_STATUS_OPEN,
+            winning_dice: UNDRAWN_DICE_NO,
+            vrf_seed: [0; 32],
+            generation_nonce,
+            program_fee,
+            vrf_last_request_at: 0,
+            vrf_retry_count: 0,
+        }
+    }
+
+    fn require_nonzero_generation_nonce(generation_nonce: &[u8; 32]) -> ProgramResult {
+        if *generation_nonce == [0; 32] {
+            return Err(DiceGenerationNonceRequired.into());
+        }
+        Ok(())
+    }
+
+    fn generation_token(
+        dice_address: &Pubkey,
+        game_id: u64,
+        creator: &Pubkey,
+        stake: u64,
+        caller_entropy: &[u8; 32],
+        creation_slot: u64,
+    ) -> [u8; 32] {
+        let mut token = hash(
+            &[
+                b"dice-generation".as_slice(),
+                dice_address.as_ref(),
+                &game_id.to_le_bytes(),
+                creator.as_ref(),
+                &stake.to_le_bytes(),
+                caller_entropy,
+                &creation_slot.to_le_bytes(),
+            ]
+            .concat(),
+        )
+        .to_bytes();
+        token[..8].copy_from_slice(&creation_slot.to_le_bytes());
+        token
+    }
+
+    fn generation_creation_slot(generation_token: &[u8; 32]) -> u64 {
+        let mut bytes = [0u8; 8];
+        bytes.copy_from_slice(&generation_token[..8]);
+        u64::from_le_bytes(bytes)
+    }
+
+    fn require_generation_mature(generation_token: &[u8; 32], current_slot: u64) -> ProgramResult {
+        if current_slot <= Self::generation_creation_slot(generation_token) {
+            return Err(DiceGenerationNotMature.into());
+        }
+        Ok(())
+    }
+
+    fn validate_generation(dice: &DiceGame, expected_generation_nonce: &[u8; 32]) -> ProgramResult {
+        Self::require_nonzero_generation_nonce(expected_generation_nonce)?;
+        if dice.generation_nonce != *expected_generation_nonce {
+            return Err(DiceGenerationNonceMismatch.into());
+        }
         Ok(())
     }
 
@@ -618,15 +746,20 @@ impl Dice {
         Ok(())
     }
 
-    fn vrf_request_seed(dice_address: &Pubkey, game_id: u64, request_slot: u64) -> [u8; 32] {
-        let game_id_bytes = game_id.to_le_bytes();
-        let request_slot_bytes = request_slot.to_le_bytes();
+    fn vrf_request_seed(
+        dice_address: &Pubkey,
+        game_id: u64,
+        generation_nonce: &[u8; 32],
+        request_slot: u64,
+    ) -> [u8; 32] {
         hash(
             &[
                 DICE_VRF_SEED,
+                b"v2",
                 dice_address.as_ref(),
-                &game_id_bytes,
-                &request_slot_bytes,
+                &game_id.to_le_bytes(),
+                generation_nonce,
+                &request_slot.to_le_bytes(),
             ]
             .concat(),
         )
@@ -723,7 +856,7 @@ mod tests {
             draw_status: DICE_STATUS_PENDING,
             winning_dice: UNDRAWN_DICE_NO,
             vrf_seed: [0; 32],
-            winner: [0; 32],
+            generation_nonce: [9; 32],
             program_fee: 3_000_000,
             vrf_last_request_at: 1_000,
             vrf_retry_count: 0,
@@ -734,17 +867,89 @@ mod tests {
     fn request_seed_changes_when_request_slot_changes() {
         let dice_address = Pubkey::new_unique();
         let game_id: u64 = 42;
-        let first = Dice::vrf_request_seed(&dice_address, game_id, 1_000);
-        let second = Dice::vrf_request_seed(&dice_address, game_id, 1_001);
+        let generation_nonce = [9; 32];
+        let first = Dice::vrf_request_seed(&dice_address, game_id, &generation_nonce, 1_000);
+        let second = Dice::vrf_request_seed(&dice_address, game_id, &generation_nonce, 1_001);
 
         assert_ne!(first, second);
+    }
+
+    #[test]
+    fn request_seed_binds_nonce_even_for_same_pda_game_and_slot() {
+        let dice_address = Pubkey::new_unique();
+        let game_id = 42;
+        let request_slot = 1_000;
+        let first = Dice::vrf_request_seed(&dice_address, game_id, &[1; 32], request_slot);
+        let second = Dice::vrf_request_seed(&dice_address, game_id, &[2; 32], request_slot);
+
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn generation_tokens_cannot_be_copied_after_the_creation_slot() {
+        let dice_address = Pubkey::new_unique();
+        let creator = Pubkey::new_unique();
+        let entropy = [7; 32];
+        let first =
+            Dice::generation_token(&dice_address, 42, &creator, 10_000_000, &entropy, 1_000);
+        // Even supplying the earlier public token as the next create's raw
+        // entropy cannot reproduce it because the contract embeds the later
+        // authoritative creation slot.
+        let second = Dice::generation_token(&dice_address, 42, &creator, 10_000_000, &first, 1_001);
+
+        assert_eq!(Dice::generation_creation_slot(&first), 1_000);
+        assert_eq!(Dice::generation_creation_slot(&second), 1_001);
+        assert_ne!(first, second);
+        assert_eq!(
+            Dice::require_generation_mature(&first, 1_000).unwrap_err(),
+            ProgramError::from(DiceGenerationNotMature)
+        );
+        assert!(Dice::require_generation_mature(&first, 1_001).is_ok());
+    }
+
+    #[test]
+    fn game_stores_the_generation_nonce_without_changing_live_layout() {
+        let nonce = [7; 32];
+        let player = Pubkey::new_unique();
+        let dice = Dice::new_game_state(
+            InitDice {
+                chosen_dices: [1, 2, 0, 0, 0, 0],
+                game_id: 91,
+                stake: 10_000_000,
+                generation_entropy: [1; 32],
+            },
+            &[1, 2],
+            &player,
+            3_000_000,
+            nonce,
+        );
+
+        assert_eq!(dice.generation_nonce, nonce);
+        assert_eq!(dice.number_of_players, 2);
+        assert_eq!(dice.initializer, player.to_bytes());
+        assert_eq!(dice.player_2, player.to_bytes());
+        assert_eq!(borsh::to_vec(&dice).unwrap().len() as u64, DICE_GAME_SPACE);
+    }
+
+    #[test]
+    fn generation_gate_accepts_only_the_live_nonce() {
+        let game = game(42);
+        assert!(Dice::validate_generation(&game, &[9; 32]).is_ok());
+        assert_eq!(
+            Dice::validate_generation(&game, &[8; 32]).unwrap_err(),
+            ProgramError::from(DiceGenerationNonceMismatch)
+        );
+        assert_eq!(
+            Dice::validate_generation(&game, &[0; 32]).unwrap_err(),
+            ProgramError::from(DiceGenerationNonceRequired)
+        );
     }
 
     #[test]
     fn retry_seeds_are_unique_but_keep_the_stable_callback_seed() {
         let dice_address = Pubkey::new_unique();
         let game_id = 42;
-        let stable_seed = Dice::vrf_request_seed(&dice_address, game_id, 1_000);
+        let stable_seed = Dice::vrf_request_seed(&dice_address, game_id, &[9; 32], 1_000);
         let first = Dice::retry_vrf_request_seed(&dice_address, game_id, &stable_seed, 1, 2_000);
         let second = Dice::retry_vrf_request_seed(&dice_address, game_id, &stable_seed, 2, 2_300);
 

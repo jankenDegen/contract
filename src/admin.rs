@@ -1,15 +1,15 @@
 use crate::{
     constants::{
-        DICE_SEED, DICE_STATUS_DRAWN, RAFFLE_SEED, RAFFLE_STATUS_DRAWN, RAFFLE_STATUS_VRF_FAILED,
-        RAFFLE_TICKET_COUNT, RUSSIAN_ROULETTE_PLAYER_COUNT, RUSSIAN_ROULETTE_SEED,
-        RUSSIAN_ROULETTE_STATUS_OPEN, RUSSIAN_ROULETTE_TABLE_COUNT,
+        RAFFLE_SEED, RAFFLE_STATUS_DRAWN, RAFFLE_STATUS_VRF_FAILED, RAFFLE_TICKET_COUNT,
+        RUSSIAN_ROULETTE_PLAYER_COUNT, RUSSIAN_ROULETTE_SEED, RUSSIAN_ROULETTE_STATUS_OPEN,
+        RUSSIAN_ROULETTE_TABLE_COUNT,
     },
     error::RPSProgramError::{
         InvalidDiceConfiguration, InvalidFeePercentage, InvalidRaffleAccount,
         InvalidRaffleConfiguration, InvalidRaffleState, InvalidRussianRouletteConfiguration,
     },
     state::{
-        Config, DiceGame, DiceManager, Manager, RaffleManager, RaffleState, RussianRouletteGame,
+        Config, DiceManager, Manager, RaffleManager, RaffleState, RussianRouletteGame,
         UpdateRussianRouletteParticipationFee, UpdateRussianRouletteTable,
     },
     utils::Utils,
@@ -284,41 +284,23 @@ impl Admin {
         Ok(())
     }
 
-    pub fn close_dice_game(accounts: &[AccountInfo], program_id: &Pubkey) -> ProgramResult {
+    pub fn close_dice_game(accounts: &[AccountInfo], _program_id: &Pubkey) -> ProgramResult {
         let accounts_iter: &mut std::slice::Iter<'_, AccountInfo<'_>> = &mut accounts.iter();
 
-        let initializer: &AccountInfo<'_> = next_account_info(accounts_iter)?;
+        let _initializer: &AccountInfo<'_> = next_account_info(accounts_iter)?;
         let dice_account: &AccountInfo<'_> = next_account_info(accounts_iter)?;
 
-        if dice_account.owner != program_id {
-            return Err(InvalidGameAccount.into());
+        // Finalization closes intrinsically. The backend's following tag-24
+        // instruction checks the resulting account-state invariant.
+        if dice_account.owner == &system_program::ID
+            && !dice_account.executable
+            && dice_account.data_is_empty()
+            && dice_account.lamports() == 0
+        {
+            return Ok(());
         }
 
-        let dice = DiceGame::try_from_slice(&dice_account.data.borrow())?;
-        let expected_dice =
-            Pubkey::find_program_address(&[DICE_SEED, &dice.game_id.to_le_bytes()], program_id).0;
-        if dice_account.key != &expected_dice {
-            return Err(InvalidGameAccount.into());
-        }
-        if dice.draw_status != DICE_STATUS_DRAWN {
-            return Err(InvalidGameState.into());
-        }
-        if initializer.key.to_bytes() != dice.initializer {
-            return Err(crate::error::RPSProgramError::InvalidInitializer.into());
-        }
-
-        let rest = **dice_account.try_borrow_lamports()?;
-
-        **dice_account.try_borrow_mut_lamports()? -= rest;
-        **initializer.try_borrow_mut_lamports()? = initializer
-            .lamports()
-            .checked_add(rest)
-            .ok_or(ArithmeticError)?;
-
-        dice_account.resize(0)?;
-        dice_account.assign(&system_program::ID);
-
-        Ok(())
+        Err(InvalidGameAccount.into())
     }
 
     pub fn close_russian_roulette_game(
@@ -465,6 +447,108 @@ mod tests {
     enum RouletteAdminUpdate {
         Fee(UpdateRussianRouletteParticipationFee),
         Table(UpdateRussianRouletteTable),
+    }
+
+    #[test]
+    fn dice_close_confirmation_accepts_an_empty_system_account() {
+        let program_id = Pubkey::new_unique();
+        let initializer_key = Pubkey::new_unique();
+        let dice_key = Pubkey::new_unique();
+        let system_owner = system_program::ID;
+        let mut initializer_lamports = 0;
+        let mut dice_lamports = 0;
+        let mut initializer_data = [];
+        let mut dice_data = [];
+        let initializer = AccountInfo::new(
+            &initializer_key,
+            false,
+            true,
+            &mut initializer_lamports,
+            &mut initializer_data,
+            &system_owner,
+            false,
+        );
+        let dice = AccountInfo::new(
+            &dice_key,
+            false,
+            true,
+            &mut dice_lamports,
+            &mut dice_data,
+            &system_owner,
+            false,
+        );
+
+        assert!(Admin::close_dice_game(&[initializer, dice], &program_id).is_ok());
+    }
+
+    #[test]
+    fn dice_close_confirmation_rejects_a_prefunded_system_account() {
+        let program_id = Pubkey::new_unique();
+        let initializer_key = Pubkey::new_unique();
+        let dice_key = Pubkey::new_unique();
+        let system_owner = system_program::ID;
+        let mut initializer_lamports = 0;
+        let mut dice_lamports = 1;
+        let mut initializer_data = [];
+        let mut dice_data = [];
+        let initializer = AccountInfo::new(
+            &initializer_key,
+            false,
+            true,
+            &mut initializer_lamports,
+            &mut initializer_data,
+            &system_owner,
+            false,
+        );
+        let dice = AccountInfo::new(
+            &dice_key,
+            false,
+            true,
+            &mut dice_lamports,
+            &mut dice_data,
+            &system_owner,
+            false,
+        );
+
+        assert_eq!(
+            Admin::close_dice_game(&[initializer, dice], &program_id).unwrap_err(),
+            ProgramError::from(InvalidGameAccount)
+        );
+    }
+
+    #[test]
+    fn dice_close_confirmation_rejects_a_program_owned_account() {
+        let program_id = Pubkey::new_unique();
+        let initializer_key = Pubkey::new_unique();
+        let dice_key = Pubkey::new_unique();
+        let system_owner = system_program::ID;
+        let mut initializer_lamports = 0;
+        let mut dice_lamports = 1;
+        let mut initializer_data = [];
+        let mut dice_data = [0u8; 1];
+        let initializer = AccountInfo::new(
+            &initializer_key,
+            false,
+            true,
+            &mut initializer_lamports,
+            &mut initializer_data,
+            &system_owner,
+            false,
+        );
+        let dice = AccountInfo::new(
+            &dice_key,
+            false,
+            true,
+            &mut dice_lamports,
+            &mut dice_data,
+            &program_id,
+            false,
+        );
+
+        assert_eq!(
+            Admin::close_dice_game(&[initializer, dice], &program_id).unwrap_err(),
+            ProgramError::from(InvalidGameAccount)
+        );
     }
 
     fn run_admin_update(

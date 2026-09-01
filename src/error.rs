@@ -4,6 +4,7 @@ use thiserror::Error;
 //ArithmeticError, InvalidAuth, InvalidConfig, InvalidCounter, NotSignerAuth, InvalidPool, InvalidPoolState
 
 #[derive(Error, Debug, Copy, Clone)]
+#[repr(u32)]
 pub enum RPSProgramError {
     /// Invalid Instruction
     #[error("Invalid Instruction")] //0
@@ -134,6 +135,15 @@ pub enum RPSProgramError {
 
     #[error("VRF retries have not been exhausted")] //42
     VrfRetriesNotExhausted,
+
+    #[error("dice generation nonce must be nonzero")] //43
+    DiceGenerationNonceRequired,
+
+    #[error("dice generation nonce does not match the live game")] //44
+    DiceGenerationNonceMismatch,
+
+    #[error("dice draw cannot start in its creation slot")] //45
+    DiceGenerationNotMature,
 }
 
 impl From<RPSProgramError> for ProgramError {

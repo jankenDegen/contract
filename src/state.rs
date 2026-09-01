@@ -122,11 +122,13 @@ pub struct InitDice {
     pub chosen_dices: [u8; 6],
     pub game_id: u64,
     pub stake: u64,
+    pub generation_entropy: [u8; 32],
 }
 
 #[derive(BorshSerialize, BorshDeserialize, Debug, Clone, PartialEq, Copy)]
 pub struct JoinDice {
     pub chosen_dices: [u8; 6],
+    pub expected_generation_nonce: [u8; 32],
 }
 
 #[derive(BorshSerialize, BorshDeserialize, Debug, Clone, PartialEq, Copy)]
@@ -176,7 +178,7 @@ pub struct DiceGame {
     pub draw_status: u8,
     pub winning_dice: u8,
     pub vrf_seed: [u8; 32],
-    pub winner: [u8; 32],
+    pub generation_nonce: [u8; 32],
     pub program_fee: u64,
     pub vrf_last_request_at: i64,
     pub vrf_retry_count: u8,
@@ -243,7 +245,7 @@ mod account_layout_tests {
             draw_status: 2,
             winning_dice: 4,
             vrf_seed: [7; 32],
-            winner: [4; 32],
+            generation_nonce: [4; 32],
             program_fee: 3_000_000,
             vrf_last_request_at: 1_234,
             vrf_retry_count: 2,
@@ -281,6 +283,25 @@ mod account_layout_tests {
             to_vec(&roulette()).unwrap().len() as u64,
             RUSSIAN_ROULETTE_GAME_SPACE
         );
+    }
+
+    #[test]
+    fn dice_layout_pins_backend_offsets() {
+        let bytes = to_vec(&dice()).unwrap();
+
+        assert_eq!(&bytes[0..8], &11_u64.to_le_bytes());
+        assert_eq!(bytes[8], 6);
+        assert_eq!(&bytes[9..17], &10_000_000_u64.to_le_bytes());
+        assert_eq!(&bytes[17..49], &[1; 32]);
+        assert_eq!(&bytes[177..209], &[6; 32]);
+        assert_eq!(&bytes[209..215], &[1, 2, 3, 4, 5, 6]);
+        assert_eq!(bytes[215], 2);
+        assert_eq!(bytes[216], 4);
+        assert_eq!(&bytes[217..249], &[7; 32]);
+        assert_eq!(&bytes[249..281], &[4; 32]);
+        assert_eq!(&bytes[281..289], &3_000_000_u64.to_le_bytes());
+        assert_eq!(&bytes[289..297], &1_234_u64.to_le_bytes());
+        assert_eq!(bytes[297], 2);
     }
 
     #[test]

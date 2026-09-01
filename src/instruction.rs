@@ -46,18 +46,6 @@ pub enum RPSProgramInstruction {
         new_manager: DiceManager,
     },
     InitDiceManager,
-    CreateDiceGame {
-        init_dice: InitDice,
-    },
-    JoinDiceGame {
-        join_dice: JoinDice,
-    },
-    RequestDiceDraw,
-    FinalizeDiceDraw,
-    DiceVrfCallback {
-        expected_vrf_seed: [u8; 32],
-        randomness: [u8; 32],
-    },
     CloseDiceGame,
     SetRussianRouletteTable {
         new_table: UpdateRussianRouletteTable,
@@ -95,14 +83,36 @@ pub enum RPSProgramInstruction {
     RetryRaffleDraw,
     MarkRaffleVrfFailed,
     RefundFailedRaffleTicket,
-    RetryDiceDraw,
-    MarkDiceVrfFailed,
-    RefundFailedDiceGame,
     MarkRussianRouletteVrfFailed {
         expected_round_id: u64,
     },
     RefundFailedRussianRouletteRound {
         expected_round_id: u64,
+    },
+    CreateDiceGame {
+        init_dice: InitDice,
+    },
+    JoinDiceGame {
+        join_dice: JoinDice,
+    },
+    RequestDiceDraw {
+        expected_generation_nonce: [u8; 32],
+    },
+    FinalizeDiceDraw {
+        expected_generation_nonce: [u8; 32],
+    },
+    RetryDiceDraw {
+        expected_generation_nonce: [u8; 32],
+    },
+    MarkDiceVrfFailed {
+        expected_generation_nonce: [u8; 32],
+    },
+    RefundFailedDiceGame {
+        expected_generation_nonce: [u8; 32],
+    },
+    DiceVrfCallback {
+        expected_vrf_seed: [u8; 32],
+        randomness: [u8; 32],
     },
 }
 
@@ -142,15 +152,10 @@ impl RPSProgramInstruction {
                 new_manager: DiceManager::try_from_slice(&rest)?,
             },
             19 => Self::InitDiceManager,
-            20 => Self::CreateDiceGame {
-                init_dice: InitDice::try_from_slice(&rest)?,
-            },
-            21 => Self::JoinDiceGame {
-                join_dice: JoinDice::try_from_slice(&rest)?,
-            },
-            22 => Self::RequestDiceDraw,
-            23 => Self::FinalizeDiceDraw,
-            24 => Self::CloseDiceGame,
+            24 => {
+                Self::require_empty(rest)?;
+                Self::CloseDiceGame
+            }
             25 => Self::SetRussianRouletteTable {
                 new_table: UpdateRussianRouletteTable::try_from_slice(&rest)?,
             },
@@ -191,23 +196,32 @@ impl RPSProgramInstruction {
                 Self::require_empty(rest)?;
                 Self::RefundFailedRaffleTicket
             }
-            38 => {
-                Self::require_empty(rest)?;
-                Self::RetryDiceDraw
-            }
-            39 => {
-                Self::require_empty(rest)?;
-                Self::MarkDiceVrfFailed
-            }
-            40 => {
-                Self::require_empty(rest)?;
-                Self::RefundFailedDiceGame
-            }
             41 => Self::MarkRussianRouletteVrfFailed {
                 expected_round_id: u64::try_from_slice(rest)?,
             },
             42 => Self::RefundFailedRussianRouletteRound {
                 expected_round_id: u64::try_from_slice(rest)?,
+            },
+            43 => Self::CreateDiceGame {
+                init_dice: InitDice::try_from_slice(rest)?,
+            },
+            44 => Self::JoinDiceGame {
+                join_dice: JoinDice::try_from_slice(rest)?,
+            },
+            45 => Self::RequestDiceDraw {
+                expected_generation_nonce: <[u8; 32]>::try_from_slice(rest)?,
+            },
+            46 => Self::FinalizeDiceDraw {
+                expected_generation_nonce: <[u8; 32]>::try_from_slice(rest)?,
+            },
+            47 => Self::RetryDiceDraw {
+                expected_generation_nonce: <[u8; 32]>::try_from_slice(rest)?,
+            },
+            48 => Self::MarkDiceVrfFailed {
+                expected_generation_nonce: <[u8; 32]>::try_from_slice(rest)?,
+            },
+            49 => Self::RefundFailedDiceGame {
+                expected_generation_nonce: <[u8; 32]>::try_from_slice(rest)?,
             },
             90 => {
                 let (expected_vrf_seed, randomness) = Self::unpack_seeded_randomness(rest)?;
@@ -450,9 +464,6 @@ mod tests {
             (35, RPSProgramInstruction::RetryRaffleDraw),
             (36, RPSProgramInstruction::MarkRaffleVrfFailed),
             (37, RPSProgramInstruction::RefundFailedRaffleTicket),
-            (38, RPSProgramInstruction::RetryDiceDraw),
-            (39, RPSProgramInstruction::MarkDiceVrfFailed),
-            (40, RPSProgramInstruction::RefundFailedDiceGame),
         ] {
             assert_eq!(RPSProgramInstruction::unpack(&[tag]).unwrap(), expected);
             assert!(RPSProgramInstruction::unpack(&[tag, 0]).is_err());
@@ -473,5 +484,91 @@ mod tests {
         );
         assert!(RPSProgramInstruction::unpack(&[41]).is_err());
         assert!(RPSProgramInstruction::unpack(&[42]).is_err());
+    }
+
+    #[test]
+    fn dice_instructions_decode_exact_generation_nonces() {
+        let nonce = [23u8; 32];
+        let init_dice = InitDice {
+            chosen_dices: [1, 0, 0, 0, 0, 0],
+            game_id: 81,
+            stake: 10_000_000,
+            generation_entropy: nonce,
+        };
+        let join_dice = JoinDice {
+            chosen_dices: [2, 0, 0, 0, 0, 0],
+            expected_generation_nonce: nonce,
+        };
+        let mut create_data = vec![43];
+        init_dice.serialize(&mut create_data).unwrap();
+        let mut join_data = vec![44];
+        join_dice.serialize(&mut join_data).unwrap();
+
+        assert_eq!(
+            RPSProgramInstruction::unpack(&create_data).unwrap(),
+            RPSProgramInstruction::CreateDiceGame { init_dice }
+        );
+        assert_eq!(
+            RPSProgramInstruction::unpack(&join_data).unwrap(),
+            RPSProgramInstruction::JoinDiceGame { join_dice }
+        );
+
+        for (tag, expected) in [
+            (
+                45,
+                RPSProgramInstruction::RequestDiceDraw {
+                    expected_generation_nonce: nonce,
+                },
+            ),
+            (
+                46,
+                RPSProgramInstruction::FinalizeDiceDraw {
+                    expected_generation_nonce: nonce,
+                },
+            ),
+            (
+                47,
+                RPSProgramInstruction::RetryDiceDraw {
+                    expected_generation_nonce: nonce,
+                },
+            ),
+            (
+                48,
+                RPSProgramInstruction::MarkDiceVrfFailed {
+                    expected_generation_nonce: nonce,
+                },
+            ),
+            (
+                49,
+                RPSProgramInstruction::RefundFailedDiceGame {
+                    expected_generation_nonce: nonce,
+                },
+            ),
+        ] {
+            let mut data = vec![tag];
+            data.extend_from_slice(&nonce);
+            assert_eq!(RPSProgramInstruction::unpack(&data).unwrap(), expected);
+            assert!(RPSProgramInstruction::unpack(&data[..data.len() - 1]).is_err());
+            data.push(0);
+            assert!(RPSProgramInstruction::unpack(&data).is_err());
+        }
+
+        assert!(RPSProgramInstruction::unpack(&create_data[..create_data.len() - 1]).is_err());
+        assert!(RPSProgramInstruction::unpack(&join_data[..join_data.len() - 1]).is_err());
+    }
+
+    #[test]
+    fn obsolete_dice_tags_are_not_part_of_the_contract() {
+        for tag in [20, 21, 22, 23, 38, 39, 40] {
+            assert_eq!(
+                RPSProgramInstruction::unpack(&[tag]).unwrap_err(),
+                ProgramError::from(InvalidInstruction)
+            );
+        }
+        assert_eq!(
+            RPSProgramInstruction::unpack(&[24]).unwrap(),
+            RPSProgramInstruction::CloseDiceGame
+        );
+        assert!(RPSProgramInstruction::unpack(&[24, 0]).is_err());
     }
 }

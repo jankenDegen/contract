@@ -162,15 +162,9 @@ impl Janken {
         let (prize, fee) = Self::calculate_prize_and_fee(game.amount, game.fee_percentage);
 
         let (outcome, guest_payout) = match (reveal.decision, game.guest_decision) {
-            (1, 1) | (2, 2) | (3, 3) => {
-                ("draw", prize / 2)
-            }
-            (1, 2) | (2, 3) | (3, 1) => {
-                ("guest_win", prize)
-            }
-            _ => {
-                ("initializer_win", 0)
-            }
+            (1, 1) | (2, 2) | (3, 3) => ("draw", prize / 2),
+            (1, 2) | (2, 3) | (3, 1) => ("guest_win", prize),
+            _ => ("initializer_win", 0),
         };
 
         Self::settle_game(
