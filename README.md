@@ -59,8 +59,8 @@ Install Docker and the Solana Verify CLI, then run the deterministic build from
 the repository root:
 
 ```bash
-cargo install solana-verify --locked
-solana-verify build
+cargo install solana-verify --version 0.5.1 --locked
+solana-verify build --library-name jankendegen --arch v0
 solana-verify get-executable-hash target/deploy/jankendegen.so
 ```
 
@@ -73,26 +73,42 @@ official repository:
 solana-verify verify-from-repo \
   -u mainnet-beta \
   --program-id Degens1tGHNhGYcMGNjTj4fMP32zrwcyeJ8ti28sfScJ \
+  --commit-hash <FULL_PUBLIC_COMMIT_SHA> \
+  --library-name jankendegen \
+  --arch v0 \
+  --keypair /path/to/upgrade-authority.json \
   https://github.com/jankenDegen/contract
 ```
 
-The repository build, deployed program, and verification record must all refer
-to the same commit and ELF hash.
+After that command rebuilds an identical ELF and uploads the verification PDA,
+submit the independent remote verification job:
+
+```bash
+solana-verify remote submit-job \
+  --url mainnet-beta \
+  --program-id Degens1tGHNhGYcMGNjTj4fMP32zrwcyeJ8ti28sfScJ \
+  --uploader <UPGRADE_AUTHORITY_PUBKEY>
+```
+
+The repository build, deployed program, verification PDA, and remote job must
+all refer to the same commit, build arguments, and ELF hash.
 
 ## Deploy
 
-Print the address associated with the generated program keypair:
-
-```bash
-solana-keygen pubkey target/deploy/jankendegen-keypair.json
-```
-
-Deploy or upgrade the program with the same program keypair:
+Deploy or upgrade the existing mainnet program with its upgrade-authority
+keypair. Do not substitute the generated `target/deploy` keypair: it represents
+a different program address.
 
 ```bash
 solana program deploy \
   target/deploy/jankendegen.so \
-  --program-id target/deploy/jankendegen-keypair.json
+  --program-id Degens1tGHNhGYcMGNjTj4fMP32zrwcyeJ8ti28sfScJ \
+  --keypair /path/to/upgrade-authority.json \
+  --fee-payer /path/to/upgrade-authority.json \
+  --upgrade-authority /path/to/upgrade-authority.json \
+  --url mainnet-beta \
+  --use-rpc \
+  --max-sign-attempts 100
 ```
 
 The program ID is not hard-coded in the Rust crate. PDA derivations use the
@@ -142,11 +158,7 @@ whose randomness is appended by the VRF program.
 | 17 | `CloseRaffle` | None |
 | 18 | `SetDiceManager` | `DiceManager` |
 | 19 | `InitDiceManager` | None |
-| 20 | `CreateDiceGame` | `InitDice` |
-| 21 | `JoinDiceGame` | `JoinDice` |
-| 22 | `RequestDiceDraw` | None |
-| 23 | `FinalizeDiceDraw` | None |
-| 24 | `CloseDiceGame` | None |
+| 24 | `CloseDiceGame` | None; confirms the preceding intrinsic close |
 | 25 | `SetRussianRouletteTable` | `UpdateRussianRouletteTable` |
 | 26 | `InitRussianRouletteTable` | `InitRussianRouletteTable` |
 | 27 | `CreateRussianRouletteGame` | `InitRussianRoulette` |
@@ -160,16 +172,20 @@ whose randomness is appended by the VRF program.
 | 35 | `RetryRaffleDraw` | None |
 | 36 | `MarkRaffleVrfFailed` | None |
 | 37 | `RefundFailedRaffleTicket` | None |
-| 38 | `RetryDiceDraw` | None |
-| 39 | `MarkDiceVrfFailed` | None |
-| 40 | `RefundFailedDiceGame` | None |
 | 41 | `MarkRussianRouletteVrfFailed` | `u64` expected round ID |
 | 42 | `RefundFailedRussianRouletteRound` | `u64` expected round ID |
+| 43 | `CreateDiceGame` | `InitDice` with nonzero 32-byte generation entropy |
+| 44 | `JoinDiceGame` | `JoinDice` with expected generation nonce |
+| 45 | `RequestDiceDraw` | `[u8; 32]` expected generation nonce |
+| 46 | `FinalizeDiceDraw` | `[u8; 32]` expected generation nonce |
+| 47 | `RetryDiceDraw` | `[u8; 32]` expected generation nonce |
+| 48 | `MarkDiceVrfFailed` | `[u8; 32]` expected generation nonce |
+| 49 | `RefundFailedDiceGame` | `[u8; 32]` expected generation nonce |
 | 90 | `RaffleVrfCallback` | Exactly `[u8; 32]` randomness, then `[u8; 32]` request seed |
 | 91 | `DiceVrfCallback` | Exactly `[u8; 32]` randomness, then `[u8; 32]` request seed |
 | 92 | `RussianRouletteVrfCallback` | `[u8; 32]` randomness, then `u64` round ID and `[u8; 32]` request seed |
 
-Tags `3`, `5`, and `6` are currently unused.
+Tags `3`, `5`, `6`, `20` through `23`, and `38` through `40` are unused and rejected.
 
 ## Program-Derived Accounts
 
@@ -201,7 +217,7 @@ discriminator.
 | `RaffleState` | Ticket bitmap, pricing, prizes, draw state, VRF value, and retry metadata |
 | `Ticket` | Ticket number, raffle number, beneficiary, and rent payer |
 | `DiceManager` | Minimum stake per face and fixed program fee |
-| `DiceGame` | Face ownership, players, snapshotted fee, draw state, VRF value, winner, and retry metadata |
+| `DiceGame` | Face ownership, players, snapshotted fee, draw state, VRF value, live generation nonce, and retry metadata |
 | `RussianRouletteGame` | Persistent table configuration, round, seats, result, retry metadata, and settlement time |
 
 Raffle, dice, and roulette draw statuses use:
@@ -218,7 +234,7 @@ The VRF account layouts store retry and settlement metadata at these offsets:
 | Account | Fields and offsets |
 | --- | --- |
 | Raffle | `vrf_last_request_at: i64` at 179; `vrf_retry_count: u8` at 187 |
-| Dice | `program_fee: u64` at 281; `vrf_last_request_at: i64` at 289; `vrf_retry_count: u8` at 297 |
+| Dice | `generation_nonce: [u8; 32]` at 249; `program_fee: u64` at 281; `vrf_last_request_at: i64` at 289; `vrf_retry_count: u8` at 297 |
 | Roulette | `vrf_last_request_at: i64` at 284; `vrf_retry_count: u8` at 292; `settled_at: i64` at 293 |
 
 Janken game state uses `1` for waiting for a guest and `2` for waiting for the
@@ -363,12 +379,39 @@ The six dice faces are independent positions. A player may select one or more
 unclaimed faces in a single instruction and pays the configured stake for each
 face. Duplicate and out-of-range selections are rejected.
 
+`CreateDiceGame` requires 32 bytes of nonzero caller entropy. The
+program derives the live generation token from that entropy, the immutable game
+terms, creator, PDA, and authoritative creation slot; the slot is also embedded
+in the token. A draw may begin only after that creation slot. Consequently a
+later generation cannot copy an earlier public token—even if a hostile creator
+reuses the same entropy—because the earlier game cannot close in its creation
+slot. While the game is live, the token is stored in
+`DiceGame.generation_nonce`. Every join and lifecycle instruction carries the
+expected token and rejects a
+different live generation before transferring funds or requesting VRF. This
+does not add a PDA or change the 298-byte Borsh account layout. The contract
+exposes only tags 43 through 49 for Dice creation and mutation; every builder
+requires the generation value.
+
 Once all six faces are assigned, VRF produces a winning face in `1..=6`. The
 owner of that face receives the six-stake pot minus the fixed dice program fee.
 The fee is snapshotted into the game account when the game is created, so an
 administrative fee update cannot change settlement for an existing game. The
 initial minimum stake is `10,000,000` lamports per face and the initial fee is
-`3,000,000` lamports.
+`3,000,000` lamports. `FinalizeDiceDraw` pays the winner and fee manager,
+returns the remaining rent and dust to the stored initializer, then resizes the
+Dice PDA to zero and assigns it to the System Program in the same instruction.
+The game ID can therefore be reused without leaving a per-game terminal account.
+The backend appends `CloseDiceGame` in the same transaction as an account-state
+check: it succeeds only when the supplied Dice account is an empty,
+zero-lamport System account.
+
+The initial request seed is
+`sha256("dice-vrf" || "v2" || dice_pda || game_id_le || generation_nonce || request_slot_le)`.
+Consequently, two closed-and-recreated generations cannot share a callback
+identity even when they reuse the same PDA and game ID. Here
+`generation_nonce` is the program-derived live token, not the raw creation
+entropy. Retries retain that stable token-bound callback seed.
 
 If VRF fails, `RefundFailedDiceGame` atomically returns one stake for each of
 the six occupied face slots. A player who owns several faces receives one
@@ -523,6 +566,9 @@ The program returns `ProgramError::Custom(code)` using this zero-based mapping:
 | 40 | `VrfRetryLimitReached` |
 | 41 | `VrfFailureTooEarly` |
 | 42 | `VrfRetriesNotExhausted` |
+| 43 | `DiceGenerationNonceRequired` |
+| 44 | `DiceGenerationNonceMismatch` |
+| 45 | `DiceGenerationNotMature` |
 
 ## Tests
 
@@ -536,6 +582,8 @@ The Rust unit tests currently cover:
 - Callback-versus-failure mutual exclusion for all three VRF games
 - Raffle winner selection and per-ticket failed-refund accounting
 - Dice duplicate-player face refunds plus account-rent recovery
+- Dice tag/payload decoding, nonce gates, 298-byte layout, and
+  same-slot generation-specific VRF seeds
 - Roulette normal settlement and failed-round stake/fee accounting and clear
 
 Run them with:
