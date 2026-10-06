@@ -53,6 +53,62 @@ target/deploy/jankendegen.so
 The crate supports a `no-entrypoint` feature for consumers that need the
 program as a dependency without exporting its Solana entrypoint.
 
+## Grant Free Passes Through The Admin API
+
+Create a local `.env` file (already ignored by Git):
+
+```dotenv
+API_URL=https://your-backend.example.com
+ADMIN_SESSION_TOKEN=your_admin_session_bearer_token
+```
+
+Use a session token for a wallet in the backend's `SEEKER_ADMIN_WALLETS`
+allowlist. This is the token from the normal backend wallet sign-in flow.
+The backend must have `POST /api/admin/seeker/free-tickets` deployed.
+
+In `client/tests.ts`, uncomment the `console.dir(await grantFreePassesBatch({...}),
+{ depth: null })` call. Supply 1–100 recipients, each with either a `username`
+or `walletAddress` and a `count` (1–100). Usernames are case-insensitive and may
+start with `@`. For example:
+
+```typescript
+console.dir(await grantFreePassesBatch({
+    recipients: [
+        { username: "alice", count: 5 },
+        { walletAddress: "RECIPIENT_SOLANA_WALLET_ADDRESS", count: 3 },
+        { username: "missing_user", count: 1 },
+    ],
+    requestId: "giveaway-20260918-001",
+    reason: "Community giveaway",
+}), { depth: null });
+```
+
+Use a unique batch request ID (8–100 letters, digits, underscores, or hyphens).
+The reason is optional. Run:
+
+```bash
+npm start
+```
+
+The helper calls the API once per recipient and continues after errors. A
+missing username is `skipped`; other errors are `failed`. It returns a report
+with `total`, `succeeded`, `skipped`, `failed`, `passesMinted`, `alreadyApplied`,
+and an ordered `results` array containing each recipient's grant or error.
+Successful retries count as `succeeded` and `alreadyApplied`, but do not add to
+`passesMinted`. Each row is a separate grant, even if a wallet appears twice.
+
+Keep the request ID, recipient order, and payload unchanged when retrying,
+including after a timeout. Successful rows will not mint again; unsuccessful
+rows are attempted again. A network failure may mean the server committed
+without returning a response, so always reuse the same request ID when retrying.
+Use a new ID only when intentionally granting more passes. Comment the call
+again to disable it. These are redeemable backend raffle credits.
+
+Both `grantFreePassesBatch` and the single-recipient `grantFreePasses` are
+exported from `client/adminApi.ts` and accept `{ apiUrl, adminSessionToken }`
+as their optional second argument. The single-recipient helper also accepts
+either `username` or `walletAddress`.
+
 ## Verifiable Build
 
 Install Docker and the Solana Verify CLI, then run the deterministic build from
@@ -65,9 +121,10 @@ solana-verify get-executable-hash target/deploy/jankendegen.so
 ```
 
 `solana-verify` reads the Solana CLI `4.0.3` pin from `Cargo.toml` and selects
-the corresponding digest-pinned build image. After the exact source revision
-has been pushed and its ELF deployed, upload the verification record from the
-official repository:
+the corresponding digest-pinned build image. The release profile uses fat LTO
+and one codegen unit so upgrades remain within the existing program allocation.
+After the exact source revision has been pushed and its ELF deployed, upload
+the verification record from the official repository:
 
 ```bash
 solana-verify verify-from-repo \
@@ -421,16 +478,49 @@ are fixed by the stored face assignments; no player signature is required.
 
 ### Russian Roulette
 
-Roulette uses three persistent table accounts with IDs `0..2`. Each table has
-six numbered seats and a monotonically increasing round ID. Seat and lifecycle
-instructions include the expected round ID to reject stale transactions.
+Roulette uses five persistent table accounts with IDs `0..4`. Every table has
+six numbered seats, a fixed `100,000,000`-lamport stake, and a monotonically
+increasing round ID. Seat and lifecycle instructions include the expected round
+ID to reject stale transactions.
 
-Each player pays the table stake plus that table's participation fee, which
+| Table ID | Eliminated | Survivors | Gross payout per survivor |
+| ---: | ---: | ---: | ---: |
+| 0 (Starter) | 1 | 5 | 120,000,000 lamports |
+| 1 | 2 | 4 | 150,000,000 lamports |
+| 2 | 3 | 3 | 200,000,000 lamports |
+| 3 | 4 | 2 | 300,000,000 lamports |
+| 4 | 5 | 1 | 600,000,000 lamports |
+
+Each player pays the fixed stake plus that table's participation fee, which
 defaults to `10,000,000` lamports. An admin can update the fee only while the
 table is open and empty, using the expected round ID; a change advances the
-round ID. When all seats are occupied, VRF selects one losing seat. The losing
-stake is split across the five survivors. Participation fees and any division
-remainder are moved to the fee manager.
+round ID. Settlement divides the complete six-stake pool by the number of
+survivors. Eliminated players receive zero. Participation fees and any integer
+division remainder are moved to the fee manager.
+
+Table 0 preserves the legacy primary result exactly:
+
+```text
+u64_le(randomness[0..8]) % 6
+```
+
+For tables `1..4`, the program ranks each zero-based seat index by the full
+SHA-256 digest of this exact byte sequence, in ascending lexicographic order:
+
+```text
+utf8("russianroulette-elimination-v2")
+|| table_id_u8
+|| round_id_u64_le
+|| randomness_32
+|| seat_index_u8
+```
+
+Digest ties are resolved by ascending seat index. The first `table_id + 1`
+ranked seats are eliminated. The client reference implementation is
+`client/russianRouletteResults.ts`. The account remains 301 bytes: the existing
+`unlucky_player_index` and `unlucky_player` fields contain the first, or primary,
+eliminated result for compatibility, while the complete set is re-derived from
+the stored raw VRF randomness, table ID, and round ID.
 
 After settlement, anyone may reset the table once its result has remained
 available for 120 seconds. Resetting validates the exact table PDA and expected
@@ -444,16 +534,10 @@ normal fee policy. The same instruction clears the table, increments its round,
 and reopens it. All destination accounts are fixed by the stored seats and
 canonical manager PDA, so no player or admin signature is required.
 
-The constants module provides these table stake presets:
-
-| Preset | Value |
-| --- | ---: |
-| Starter | 100,000,000 lamports |
-| Prime | 500,000,000 lamports |
-| Apex | 1,000,000,000 lamports |
-
-Table initialization enforces a nonzero stake and a participation fee below the
-stake; the caller chooses which preset value to assign to each table.
+Table initialization and administrative table updates enforce the fixed stake
+and a participation fee below it. `SetRussianRouletteTable` can migrate an open,
+empty legacy table to the fixed stake without changing its fee; a stake change
+advances the existing round ID rather than resetting it.
 
 ## MagicBlock VRF
 

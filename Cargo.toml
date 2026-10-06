@@ -16,6 +16,11 @@ solana = "4.0.3"
 default = []
 no-entrypoint = []
 
+[profile.release]
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = [
   'cfg(target_os, values("solana"))',
