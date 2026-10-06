@@ -24,6 +24,7 @@ pub const DICE_MANAGER_SEED: &[u8] = b"dicemanager";
 pub const DICE_VRF_SEED: &[u8] = b"dice-vrf";
 pub const RUSSIAN_ROULETTE_SEED: &[u8] = b"russianroulette";
 pub const RUSSIAN_ROULETTE_VRF_SEED: &[u8] = b"russianroulette-vrf";
+pub const RUSSIAN_ROULETTE_ELIMINATION_V2_DOMAIN: &[u8] = b"russianroulette-elimination-v2";
 
 pub const RAFFLE_VRF_CALLBACK_TAG: u8 = 90;
 pub const DICE_VRF_CALLBACK_TAG: u8 = 91;
@@ -45,10 +46,8 @@ pub const DICE_STATUS_VRF_FAILED: u8 = 3;
 pub const UNDRAWN_DICE_NO: u8 = 0;
 
 pub const RUSSIAN_ROULETTE_PLAYER_COUNT: u8 = 6;
-pub const RUSSIAN_ROULETTE_TABLE_COUNT: u8 = 3;
-pub const RUSSIAN_ROULETTE_STARTER_STAKE: u64 = 100_000_000;
-pub const RUSSIAN_ROULETTE_PRIME_STAKE: u64 = 500_000_000;
-pub const RUSSIAN_ROULETTE_APEX_STAKE: u64 = 1_000_000_000;
+pub const RUSSIAN_ROULETTE_TABLE_COUNT: u8 = 5;
+pub const RUSSIAN_ROULETTE_STAKE: u64 = 100_000_000;
 pub const RUSSIAN_ROULETTE_DEFAULT_PARTICIPATION_FEE: u64 = 10_000_000;
 pub const RUSSIAN_ROULETTE_STATUS_OPEN: u8 = 0;
 pub const RUSSIAN_ROULETTE_STATUS_PENDING: u8 = 1;

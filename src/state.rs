@@ -198,8 +198,11 @@ pub struct RussianRouletteGame {
     pub seat_4: [u8; 32],
     pub seat_5: [u8; 32],
     pub seat_6: [u8; 32],
+    /// Primary eliminated seat index, retained as a singular compatibility field.
+    /// The complete eliminated set is derived from `vrf_seed`, `table_id`, and `round_id`.
     pub unlucky_player_index: u8,
     pub vrf_seed: [u8; 32],
+    /// Primary eliminated player, retained as a singular compatibility field.
     pub unlucky_player: [u8; 32],
     pub vrf_last_request_at: i64,
     pub vrf_retry_count: u8,

@@ -1,7 +1,8 @@
 use crate::{
     constants::{
-        MANAGER_SEED, RUSSIAN_ROULETTE_PLAYER_COUNT, RUSSIAN_ROULETTE_RESULT_RETENTION_SECONDS,
-        RUSSIAN_ROULETTE_SEED, RUSSIAN_ROULETTE_STATUS_DRAWN, RUSSIAN_ROULETTE_STATUS_OPEN,
+        MANAGER_SEED, RUSSIAN_ROULETTE_ELIMINATION_V2_DOMAIN, RUSSIAN_ROULETTE_PLAYER_COUNT,
+        RUSSIAN_ROULETTE_RESULT_RETENTION_SECONDS, RUSSIAN_ROULETTE_SEED,
+        RUSSIAN_ROULETTE_STATUS_DRAWN, RUSSIAN_ROULETTE_STATUS_OPEN,
         RUSSIAN_ROULETTE_STATUS_PENDING, RUSSIAN_ROULETTE_STATUS_VRF_FAILED,
         RUSSIAN_ROULETTE_TABLE_COUNT, RUSSIAN_ROULETTE_VRF_CALLBACK_TAG, RUSSIAN_ROULETTE_VRF_SEED,
         UNLUCKY_PLAYER_INDEX_NONE,
@@ -29,6 +30,22 @@ use solana_program::{
 use solana_system_interface::instruction::transfer;
 
 pub struct RussianRoulette;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct RouletteSettlementSummary {
+    eliminated_mask: u8,
+    eliminated_count: u8,
+    survivor_count: u8,
+    survivor_payout: u64,
+    fee_total: u64,
+    primary_eliminated_index: u8,
+}
+
+impl RouletteSettlementSummary {
+    fn is_eliminated(&self, index: usize) -> bool {
+        self.eliminated_mask & (1u8 << index) != 0
+    }
+}
 
 impl RussianRoulette {
     pub fn create_game(
@@ -285,7 +302,7 @@ impl RussianRoulette {
         ];
         Self::validate_player_accounts(&game, &player_accounts)?;
 
-        Self::settle_draw(
+        let settlement = Self::settle_draw(
             game_account,
             manager_account,
             &player_accounts,
@@ -297,33 +314,32 @@ impl RussianRoulette {
         game.serialize(&mut &mut game_account.data.borrow_mut()[..])?;
         manager.serialize(&mut &mut manager_account.data.borrow_mut()[..])?;
 
-        let losing_seat = game.unlucky_player_index + 1;
         msg!(
-            "roulette_result table_id={} round_id={} losing_seat={} losing_player={} stake_lamports={}",
+            "roulette_result table_id={} round_id={} eliminated_seat_mask={} eliminated_count={} survivor_count={} primary_eliminated_seat={} primary_eliminated_player={} stake_lamports={} survivor_payout_lamports={} fee_total_lamports={}",
             game.table_id,
             game.round_id,
-            losing_seat,
+            settlement.eliminated_mask,
+            settlement.eliminated_count,
+            settlement.survivor_count,
+            settlement.primary_eliminated_index + 1,
             Pubkey::new_from_array(game.unlucky_player),
-            game.stake
+            game.stake,
+            settlement.survivor_payout,
+            settlement.fee_total
         );
-        let survivor_count = (RUSSIAN_ROULETTE_PLAYER_COUNT - 1) as u64;
-        let survivor_payout = game
-            .stake
-            .checked_add(
-                game.stake
-                    .checked_div(survivor_count)
-                    .ok_or(ArithmeticError)?,
-            )
-            .ok_or(ArithmeticError)?;
         for (index, account) in player_accounts.iter().enumerate() {
-            let is_loser = index == game.unlucky_player_index as usize;
+            let is_eliminated = settlement.is_eliminated(index);
             msg!(
                 "roulette_player_result seat={} address={} outcome={} stake_lamports={} payout_lamports={}",
                 index + 1,
                 account.key,
-                if is_loser { "loser" } else { "winner" },
+                if is_eliminated { "eliminated" } else { "survivor" },
                 game.stake,
-                if is_loser { 0 } else { survivor_payout }
+                if is_eliminated {
+                    0
+                } else {
+                    settlement.survivor_payout
+                }
             );
         }
 
@@ -355,17 +371,22 @@ impl RussianRoulette {
         Self::validate_unresolved_pending(&game)?;
 
         let random_number = Self::randomness_number(&randomness);
-        let unlucky_player_index = Self::unlucky_player_index(&randomness);
+        let elimination_order = Self::elimination_order(game.table_id, game.round_id, &randomness)?;
+        let eliminated_count = Self::elimination_count(game.table_id)?;
+        let eliminated_mask = Self::eliminated_mask(&elimination_order, eliminated_count)?;
+        let unlucky_player_index = elimination_order[0];
         game.vrf_seed = randomness;
         game.unlucky_player_index = unlucky_player_index;
         game.serialize(&mut &mut game_account.data.borrow_mut()[..])?;
 
         msg!(
-            "roulette_vrf_result table_id={} round_id={} randomness={} random_u64={} losing_seat={}",
+            "roulette_vrf_result table_id={} round_id={} randomness={} random_u64={} eliminated_seat_mask={} eliminated_count={} primary_eliminated_seat={}",
             game.table_id,
             game.round_id,
             Pubkey::new_from_array(randomness),
             random_number,
+            eliminated_mask,
+            eliminated_count,
             unlucky_player_index + 1
         );
 
@@ -522,7 +543,7 @@ impl RussianRoulette {
         player_accounts: &[&AccountInfo; 6],
         game: &mut RussianRouletteGame,
         manager: &mut Manager,
-    ) -> ProgramResult {
+    ) -> Result<RouletteSettlementSummary, ProgramError> {
         if game.draw_status != RUSSIAN_ROULETTE_STATUS_PENDING {
             return Err(InvalidGameState.into());
         }
@@ -532,25 +553,17 @@ impl RussianRoulette {
 
         Self::validate_player_accounts(game, player_accounts)?;
 
-        let unlucky_index = game.unlucky_player_index;
-        let unlucky_account = player_accounts[unlucky_index as usize];
-        let survivor_count = (RUSSIAN_ROULETTE_PLAYER_COUNT - 1) as u64;
-        let survivor_bonus = game
-            .stake
-            .checked_div(survivor_count)
-            .ok_or(ArithmeticError)?;
-        let remainder = game
-            .stake
-            .checked_rem(survivor_count)
-            .ok_or(ArithmeticError)?;
-        let survivor_payout = game
-            .stake
-            .checked_add(survivor_bonus)
-            .ok_or(ArithmeticError)?;
-        let participation_fee_total = Self::participation_fee_total(game)?;
-        let fee_total = participation_fee_total
-            .checked_add(remainder)
-            .ok_or(ArithmeticError)?;
+        let elimination_order =
+            Self::elimination_order(game.table_id, game.round_id, &game.vrf_seed)?;
+        let eliminated_count = Self::elimination_count(game.table_id)?;
+        let eliminated_mask = Self::eliminated_mask(&elimination_order, eliminated_count)?;
+        let primary_eliminated_index = elimination_order[0];
+        if game.unlucky_player_index != primary_eliminated_index {
+            return Err(InvalidGameState.into());
+        }
+        let primary_eliminated_account = player_accounts[primary_eliminated_index as usize];
+        let (survivor_count, survivor_payout, fee_total) =
+            Self::settlement_terms(game, eliminated_count)?;
 
         manager.collected_fee = manager
             .collected_fee
@@ -561,7 +574,7 @@ impl RussianRoulette {
         **manager_account.try_borrow_mut_lamports()? += fee_total;
 
         for (index, account) in player_accounts.iter().enumerate() {
-            if index == unlucky_index as usize {
+            if eliminated_mask & (1u8 << index) != 0 {
                 continue;
             }
 
@@ -569,11 +582,18 @@ impl RussianRoulette {
             **account.try_borrow_mut_lamports()? += survivor_payout;
         }
 
-        game.unlucky_player_index = unlucky_index;
-        game.unlucky_player = unlucky_account.key.to_bytes();
+        game.unlucky_player_index = primary_eliminated_index;
+        game.unlucky_player = primary_eliminated_account.key.to_bytes();
         game.draw_status = RUSSIAN_ROULETTE_STATUS_DRAWN;
 
-        Ok(())
+        Ok(RouletteSettlementSummary {
+            eliminated_mask,
+            eliminated_count,
+            survivor_count,
+            survivor_payout,
+            fee_total,
+            primary_eliminated_index,
+        })
     }
 
     fn settle_failed_refund(
@@ -754,6 +774,31 @@ impl RussianRoulette {
             .ok_or(ArithmeticError.into())
     }
 
+    fn settlement_terms(
+        game: &RussianRouletteGame,
+        eliminated_count: u8,
+    ) -> Result<(u8, u64, u64), ProgramError> {
+        let survivor_count = RUSSIAN_ROULETTE_PLAYER_COUNT
+            .checked_sub(eliminated_count)
+            .filter(|count| *count > 0)
+            .ok_or(ArithmeticError)?;
+        let total_stake_pool = game
+            .stake
+            .checked_mul(RUSSIAN_ROULETTE_PLAYER_COUNT as u64)
+            .ok_or(ArithmeticError)?;
+        let survivor_payout = total_stake_pool
+            .checked_div(survivor_count as u64)
+            .ok_or(ArithmeticError)?;
+        let remainder = total_stake_pool
+            .checked_rem(survivor_count as u64)
+            .ok_or(ArithmeticError)?;
+        let fee_total = Self::participation_fee_total(game)?
+            .checked_add(remainder)
+            .ok_or(ArithmeticError)?;
+
+        Ok((survivor_count, survivor_payout, fee_total))
+    }
+
     fn vrf_request_seed(
         game_address: &Pubkey,
         table_id: u8,
@@ -804,7 +849,91 @@ impl RussianRoulette {
         callback_args
     }
 
-    fn unlucky_player_index(randomness: &[u8; 32]) -> u8 {
+    fn elimination_count(table_id: u8) -> Result<u8, ProgramError> {
+        if table_id >= RUSSIAN_ROULETTE_TABLE_COUNT {
+            return Err(InvalidGameAccount.into());
+        }
+
+        table_id.checked_add(1).ok_or(ArithmeticError.into())
+    }
+
+    /// Returns all six zero-based seat indexes in deterministic result order.
+    ///
+    /// Table 0 preserves the original `first_u64_le % 6` primary loser. For
+    /// tables 1 through 4 each seat is ranked by the lexicographically ordered
+    /// SHA-256 digest of:
+    ///
+    /// `domain || table_id_u8 || round_id_u64_le || randomness_32 || seat_index_u8`
+    ///
+    /// Digest ties are resolved by ascending seat index. The first
+    /// `table_id + 1` indexes are eliminated.
+    fn elimination_order(
+        table_id: u8,
+        round_id: u64,
+        randomness: &[u8; 32],
+    ) -> Result<[u8; 6], ProgramError> {
+        Self::elimination_count(table_id)?;
+        let mut order = [0, 1, 2, 3, 4, 5];
+        if table_id == 0 {
+            let primary = Self::legacy_unlucky_player_index(randomness);
+            order[0] = primary;
+            let mut position = 1;
+            for seat_index in 0..RUSSIAN_ROULETTE_PLAYER_COUNT {
+                if seat_index != primary {
+                    order[position] = seat_index;
+                    position += 1;
+                }
+            }
+            return Ok(order);
+        }
+
+        let table_id_bytes = [table_id];
+        let round_id_bytes = round_id.to_le_bytes();
+        let mut ranked_seats = [([0u8; 32], 0u8); 6];
+        for seat_index in 0..RUSSIAN_ROULETTE_PLAYER_COUNT {
+            let seat_index_bytes = [seat_index];
+            let digest = hash(
+                &[
+                    RUSSIAN_ROULETTE_ELIMINATION_V2_DOMAIN,
+                    &table_id_bytes,
+                    &round_id_bytes,
+                    randomness,
+                    &seat_index_bytes,
+                ]
+                .concat(),
+            )
+            .to_bytes();
+            ranked_seats[seat_index as usize] = (digest, seat_index);
+        }
+        ranked_seats
+            .sort_unstable_by(|left, right| left.0.cmp(&right.0).then(left.1.cmp(&right.1)));
+        for (position, (_, seat_index)) in ranked_seats.iter().enumerate() {
+            order[position] = *seat_index;
+        }
+
+        Ok(order)
+    }
+
+    fn eliminated_mask(order: &[u8; 6], eliminated_count: u8) -> Result<u8, ProgramError> {
+        if eliminated_count == 0 || eliminated_count >= RUSSIAN_ROULETTE_PLAYER_COUNT {
+            return Err(InvalidGameState.into());
+        }
+
+        let mut mask = 0u8;
+        for seat_index in order.iter().take(eliminated_count as usize) {
+            if *seat_index >= RUSSIAN_ROULETTE_PLAYER_COUNT {
+                return Err(InvalidGameState.into());
+            }
+            let seat_bit = 1u8 << *seat_index;
+            if mask & seat_bit != 0 {
+                return Err(InvalidGameState.into());
+            }
+            mask |= seat_bit;
+        }
+        Ok(mask)
+    }
+
+    fn legacy_unlucky_player_index(randomness: &[u8; 32]) -> u8 {
         (Self::randomness_number(randomness) % RUSSIAN_ROULETTE_PLAYER_COUNT as u64) as u8
     }
 
@@ -820,6 +949,8 @@ mod tests {
     use super::*;
 
     fn game(program_fee: u64) -> RussianRouletteGame {
+        let mut randomness = [0u8; 32];
+        randomness[..8].copy_from_slice(&2u64.to_le_bytes());
         RussianRouletteGame {
             table_id: 0,
             round_id: 9,
@@ -834,7 +965,7 @@ mod tests {
             seat_5: [5; 32],
             seat_6: [6; 32],
             unlucky_player_index: 2,
-            vrf_seed: [7; 32],
+            vrf_seed: randomness,
             unlucky_player: [3; 32],
             vrf_last_request_at: 1_000,
             vrf_retry_count: 0,
@@ -862,6 +993,70 @@ mod tests {
             borsh::to_vec(&game(25_000_000)).unwrap().len(),
             crate::constants::RUSSIAN_ROULETTE_GAME_SPACE as usize
         );
+    }
+
+    #[test]
+    fn elimination_order_matches_the_cross_language_reference_vectors() {
+        let randomness: [u8; 32] = core::array::from_fn(|index| index as u8);
+        let expected_orders = [
+            [4, 0, 1, 2, 3, 5],
+            [4, 0, 1, 5, 3, 2],
+            [0, 5, 4, 2, 1, 3],
+            [5, 2, 0, 1, 3, 4],
+            [0, 2, 5, 1, 3, 4],
+        ];
+
+        for table_id in 0..RUSSIAN_ROULETTE_TABLE_COUNT {
+            let order = RussianRoulette::elimination_order(table_id, 42, &randomness).unwrap();
+            assert_eq!(order, expected_orders[table_id as usize]);
+            let eliminated_count = RussianRoulette::elimination_count(table_id).unwrap();
+            let mask = RussianRoulette::eliminated_mask(&order, eliminated_count).unwrap();
+            assert_eq!(mask.count_ones(), eliminated_count as u32);
+            assert_eq!(order[0], expected_orders[table_id as usize][0]);
+        }
+    }
+
+    #[test]
+    fn starter_table_preserves_the_legacy_primary_loser() {
+        for random_u64 in [0, 1, 5, 6, 42, u64::MAX] {
+            let mut randomness = [0u8; 32];
+            randomness[..8].copy_from_slice(&random_u64.to_le_bytes());
+            let order = RussianRoulette::elimination_order(0, 999, &randomness).unwrap();
+            assert_eq!(order[0], (random_u64 % 6) as u8);
+        }
+    }
+
+    #[test]
+    fn elimination_helpers_reject_unknown_tables_and_duplicate_seats() {
+        assert_eq!(
+            RussianRoulette::elimination_order(RUSSIAN_ROULETTE_TABLE_COUNT, 42, &[0u8; 32],)
+                .unwrap_err(),
+            ProgramError::from(InvalidGameAccount)
+        );
+        assert_eq!(
+            RussianRoulette::eliminated_mask(&[0, 0, 1, 2, 3, 4], 2).unwrap_err(),
+            ProgramError::from(InvalidGameState)
+        );
+    }
+
+    #[test]
+    fn settlement_terms_cover_all_elimination_counts_and_route_dust_to_fees() {
+        let mut table = game(10_000_000);
+        table.stake = 100_000_003;
+        let total_pool = table.stake * RUSSIAN_ROULETTE_PLAYER_COUNT as u64;
+        let participation_fees = table.program_fee * RUSSIAN_ROULETTE_PLAYER_COUNT as u64;
+
+        for eliminated_count in 1..RUSSIAN_ROULETTE_PLAYER_COUNT {
+            let (survivors, payout, fees) =
+                RussianRoulette::settlement_terms(&table, eliminated_count).unwrap();
+            assert_eq!(survivors, RUSSIAN_ROULETTE_PLAYER_COUNT - eliminated_count);
+            assert_eq!(payout, total_pool / survivors as u64);
+            assert_eq!(fees, participation_fees + total_pool % survivors as u64);
+            assert_eq!(
+                payout * survivors as u64 + (fees - participation_fees),
+                total_pool
+            );
+        }
     }
 
     #[test]

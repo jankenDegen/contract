@@ -1,8 +1,8 @@
 use crate::{
     constants::{
         RAFFLE_SEED, RAFFLE_STATUS_DRAWN, RAFFLE_STATUS_VRF_FAILED, RAFFLE_TICKET_COUNT,
-        RUSSIAN_ROULETTE_PLAYER_COUNT, RUSSIAN_ROULETTE_SEED, RUSSIAN_ROULETTE_STATUS_OPEN,
-        RUSSIAN_ROULETTE_TABLE_COUNT,
+        RUSSIAN_ROULETTE_PLAYER_COUNT, RUSSIAN_ROULETTE_SEED, RUSSIAN_ROULETTE_STAKE,
+        RUSSIAN_ROULETTE_STATUS_OPEN, RUSSIAN_ROULETTE_TABLE_COUNT,
     },
     error::RPSProgramError::{
         InvalidDiceConfiguration, InvalidFeePercentage, InvalidRaffleAccount,
@@ -374,7 +374,7 @@ impl Admin {
     }
 
     fn validate_russian_roulette_table(table: UpdateRussianRouletteTable) -> ProgramResult {
-        if table.stake == 0
+        if table.stake != RUSSIAN_ROULETTE_STAKE
             || table.program_fee >= table.stake
             || table
                 .stake
@@ -426,7 +426,7 @@ mod tests {
             round_id: 12,
             draw_status,
             number_of_players,
-            stake: 500_000_000,
+            stake: RUSSIAN_ROULETTE_STAKE,
             program_fee: 10_000_000,
             seat_1: [0; 32],
             seat_2: [0; 32],
@@ -677,7 +677,7 @@ mod tests {
         );
 
         result.unwrap();
-        assert_eq!(updated.stake, 500_000_000);
+        assert_eq!(updated.stake, RUSSIAN_ROULETTE_STAKE);
         assert_eq!(updated.program_fee, 25_000_000);
         assert_eq!(updated.round_id, 13);
     }
@@ -700,11 +700,11 @@ mod tests {
     }
 
     #[test]
-    fn stake_table_setter_cannot_change_the_fee_or_bypass_the_round_bump() {
+    fn stake_table_setter_only_migrates_to_the_fixed_stake_without_changing_the_fee() {
         let (mismatch_result, unchanged) = run_table_update(
             table(0, RUSSIAN_ROULETTE_STATUS_OPEN),
             UpdateRussianRouletteTable {
-                stake: 750_000_000,
+                stake: RUSSIAN_ROULETTE_STAKE,
                 program_fee: 25_000_000,
             },
         );
@@ -712,21 +712,37 @@ mod tests {
             mismatch_result.unwrap_err(),
             ProgramError::from(InvalidRussianRouletteConfiguration)
         );
-        assert_eq!(unchanged.stake, 500_000_000);
+        assert_eq!(unchanged.stake, RUSSIAN_ROULETTE_STAKE);
         assert_eq!(unchanged.program_fee, 10_000_000);
         assert_eq!(unchanged.round_id, 12);
 
+        let mut legacy_table = table(0, RUSSIAN_ROULETTE_STATUS_OPEN);
+        legacy_table.stake = 500_000_000;
         let (update_result, updated) = run_table_update(
-            table(0, RUSSIAN_ROULETTE_STATUS_OPEN),
+            legacy_table,
             UpdateRussianRouletteTable {
-                stake: 750_000_000,
+                stake: RUSSIAN_ROULETTE_STAKE,
                 program_fee: 10_000_000,
             },
         );
         update_result.unwrap();
-        assert_eq!(updated.stake, 750_000_000);
+        assert_eq!(updated.stake, RUSSIAN_ROULETTE_STAKE);
         assert_eq!(updated.program_fee, 10_000_000);
         assert_eq!(updated.round_id, 13);
+
+        let (invalid_result, unchanged) = run_table_update(
+            table(0, RUSSIAN_ROULETTE_STATUS_OPEN),
+            UpdateRussianRouletteTable {
+                stake: RUSSIAN_ROULETTE_STAKE + 1,
+                program_fee: 10_000_000,
+            },
+        );
+        assert_eq!(
+            invalid_result.unwrap_err(),
+            ProgramError::from(InvalidRussianRouletteConfiguration)
+        );
+        assert_eq!(unchanged.stake, RUSSIAN_ROULETTE_STAKE);
+        assert_eq!(unchanged.round_id, 12);
     }
 
     #[test]
@@ -792,26 +808,26 @@ mod tests {
     }
 
     #[test]
-    fn roulette_fee_validation_allows_zero_and_rejects_stake_or_overflowing_fees() {
+    fn roulette_validation_enforces_the_fixed_stake_and_fee_bounds() {
         assert!(
             Admin::validate_russian_roulette_table(UpdateRussianRouletteTable {
-                stake: 500_000_000,
+                stake: RUSSIAN_ROULETTE_STAKE,
                 program_fee: 0,
             })
             .is_ok()
         );
         assert!(
             Admin::validate_russian_roulette_table(UpdateRussianRouletteTable {
-                stake: 500_000_000,
-                program_fee: 499_999_999,
+                stake: RUSSIAN_ROULETTE_STAKE,
+                program_fee: RUSSIAN_ROULETTE_STAKE - 1,
             })
             .is_ok()
         );
 
-        for program_fee in [500_000_000, u64::MAX] {
+        for program_fee in [RUSSIAN_ROULETTE_STAKE, u64::MAX] {
             assert_eq!(
                 Admin::validate_russian_roulette_table(UpdateRussianRouletteTable {
-                    stake: 500_000_000,
+                    stake: RUSSIAN_ROULETTE_STAKE,
                     program_fee,
                 })
                 .unwrap_err(),
@@ -821,7 +837,7 @@ mod tests {
 
         assert_eq!(
             Admin::validate_russian_roulette_table(UpdateRussianRouletteTable {
-                stake: u64::MAX / 4,
+                stake: RUSSIAN_ROULETTE_STAKE + 1,
                 program_fee: 1,
             })
             .unwrap_err(),

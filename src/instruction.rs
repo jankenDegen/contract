@@ -117,6 +117,9 @@ pub enum RPSProgramInstruction {
 }
 
 impl RPSProgramInstruction {
+    // Keep deserialization out of the dispatcher frame so size-optimized SBF
+    // builds stay below the VM's 4 KiB stack-frame limit.
+    #[inline(never)]
     pub fn unpack(input: &[u8]) -> Result<Self, ProgramError> {
         let (tag, rest) = input.split_first().ok_or(InvalidInstruction)?;
         Ok(match tag {
