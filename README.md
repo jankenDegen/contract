@@ -187,6 +187,7 @@ program ID supplied by the Solana runtime.
 | `src/dice.rs` | Face selection, VRF draw, and winner settlement |
 | `src/russian_roulette.rs` | Seat, round, VRF, payout, retry, and reset logic |
 | `src/magicblock_vrf.rs` | MagicBlock VRF request and callback validation |
+| `src/winner_draw.rs` | Generic MagicBlock VRF winner-number requests and callbacks |
 | `src/utils.rs` | Admin checks and PDA creation |
 | `src/error.rs` | Custom program errors |
 
@@ -238,9 +239,11 @@ whose randomness is appended by the VRF program.
 | 47 | `RetryDiceDraw` | `[u8; 32]` expected generation nonce |
 | 48 | `MarkDiceVrfFailed` | `[u8; 32]` expected generation nonce |
 | 49 | `RefundFailedDiceGame` | `[u8; 32]` expected generation nonce |
+| 50 | `RequestWinnerDraw` | `u32` winner count, `u32` participant count, then `[u8; 32]` users-list hash |
 | 90 | `RaffleVrfCallback` | Exactly `[u8; 32]` randomness, then `[u8; 32]` request seed |
 | 91 | `DiceVrfCallback` | Exactly `[u8; 32]` randomness, then `[u8; 32]` request seed |
 | 92 | `RussianRouletteVrfCallback` | `[u8; 32]` randomness, then `u64` round ID and `[u8; 32]` request seed |
+| 93 | `WinnerDrawVrfCallback` | `[u8; 32]` randomness, `u32` winner count, `u32` participant count, `[u8; 32]` users-list hash, then `[u8; 32]` request seed |
 
 Tags `3`, `5`, `6`, `20` through `23`, and `38` through `40` are unused and rejected.
 
@@ -373,7 +376,34 @@ signers must be marked as signers in the instruction metas.
 | `RefundFailedRussianRouletteRound` | table, fee manager, seats 1 through 6 |
 | `ResetRussianRouletteTable` | table |
 
+### Generic Winner Draw
+
+| Instruction | Ordered accounts |
+| --- | --- |
+| `RequestWinnerDraw` | payer, VRF request identity, oracle queue, system program, slot hashes sysvar, VRF program |
+| `WinnerDrawVrfCallback` | VRF callback identity |
+
 ## Game Rules
+
+### Generic Winner Draw
+
+`RequestWinnerDraw` is a permissionless, account-free MagicBlock VRF utility.
+It accepts `number_of_winners` and `number_of_participants` as little-endian
+`u32` values plus a 32-byte users-list hash used only as logged metadata. Both
+counts must be nonzero, winners cannot exceed participants, and a single
+request is capped at 256 winners. Participant numbers are one-based:
+`1..=number_of_participants`. The users-list hash does not affect randomness or
+winner selection.
+
+The authenticated callback uses rejection sampling and Floyd's sampling
+algorithm to produce an unbiased unique subset without allocating memory for
+every participant. All winners are equivalent; the result is sorted before it
+is logged. The request emits `winner_draw_requested`, and the callback emits
+`winner_draw_result` with the request seed, raw randomness, users-list hash,
+both counts, and `winning_numbers`.
+No PDA is created and no result is stored. Consumers that associate numbers
+with people or tickets must freeze that mapping off-chain before requesting the
+draw; the program proves the numeric selection, not the external mapping.
 
 ### Janken
 
@@ -653,6 +683,7 @@ The program returns `ProgramError::Custom(code)` using this zero-based mapping:
 | 43 | `DiceGenerationNonceRequired` |
 | 44 | `DiceGenerationNonceMismatch` |
 | 45 | `DiceGenerationNotMature` |
+| 46 | `InvalidWinnerDrawConfiguration` |
 
 ## Tests
 
@@ -669,6 +700,8 @@ The Rust unit tests currently cover:
 - Dice tag/payload decoding, nonce gates, 298-byte layout, and
   same-slot generation-specific VRF seeds
 - Roulette normal settlement and failed-round stake/fee accounting and clear
+- Generic winner-draw bounds, fixed vectors, uniqueness, instruction framing,
+  and maximum-count selection
 
 Run them with:
 
