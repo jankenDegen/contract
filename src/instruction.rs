@@ -249,7 +249,6 @@ impl RPSProgramInstruction {
                     randomness,
                 }
             }
-
             _ => return Err(InvalidInstruction.into()),
         })
     }

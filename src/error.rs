@@ -144,6 +144,9 @@ pub enum RPSProgramError {
 
     #[error("dice draw cannot start in its creation slot")] //45
     DiceGenerationNotMature,
+
+    #[error("invalid winner draw configuration")] //46
+    InvalidWinnerDrawConfiguration,
 }
 
 impl From<RPSProgramError> for ProgramError {

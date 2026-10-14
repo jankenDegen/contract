@@ -25,10 +25,14 @@ pub const DICE_VRF_SEED: &[u8] = b"dice-vrf";
 pub const RUSSIAN_ROULETTE_SEED: &[u8] = b"russianroulette";
 pub const RUSSIAN_ROULETTE_VRF_SEED: &[u8] = b"russianroulette-vrf";
 pub const RUSSIAN_ROULETTE_ELIMINATION_V2_DOMAIN: &[u8] = b"russianroulette-elimination-v2";
+pub const WINNER_DRAW_VRF_SEED: &[u8] = b"winner-draw-vrf";
+pub const WINNER_DRAW_SELECTION_DOMAIN: &[u8] = b"winner-draw-selection-v1";
+pub const WINNER_DRAW_MAX_WINNERS: u32 = 256;
 
 pub const RAFFLE_VRF_CALLBACK_TAG: u8 = 90;
 pub const DICE_VRF_CALLBACK_TAG: u8 = 91;
 pub const RUSSIAN_ROULETTE_VRF_CALLBACK_TAG: u8 = 92;
+pub const WINNER_DRAW_VRF_CALLBACK_TAG: u8 = 93;
 
 pub const RAFFLE_STATUS_OPEN: u8 = 0;
 pub const RAFFLE_STATUS_PENDING: u8 = 1;

@@ -2,12 +2,24 @@ use solana_program::{account_info::AccountInfo, entrypoint::ProgramResult, pubke
 
 use crate::{
     admin::Admin, dice::Dice, initialize::Init, instruction::RPSProgramInstruction, janken::Janken,
-    raffle::Raffle, russian_roulette::RussianRoulette,
+    raffle::Raffle, russian_roulette::RussianRoulette, winner_draw::WinnerDraw,
 };
 
 pub struct Processor;
 impl Processor {
     pub fn process(
+        program_id: &Pubkey,
+        accounts: &[AccountInfo],
+        instruction_data: &[u8],
+    ) -> ProgramResult {
+        match instruction_data.first() {
+            Some(50 | 93) => WinnerDraw::process(accounts, program_id, instruction_data),
+            _ => Self::process_game_instruction(program_id, accounts, instruction_data),
+        }
+    }
+
+    #[inline(never)]
+    fn process_game_instruction(
         program_id: &Pubkey,
         accounts: &[AccountInfo],
         instruction_data: &[u8],
