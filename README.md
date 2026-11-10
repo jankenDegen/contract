@@ -217,7 +217,6 @@ whose randomness is appended by the VRF program.
 | 18 | `SetDiceManager` | `DiceManager` |
 | 19 | `InitDiceManager` | None |
 | 24 | `CloseDiceGame` | None; confirms the preceding intrinsic close |
-| 25 | `SetRussianRouletteTable` | `UpdateRussianRouletteTable` |
 | 26 | `InitRussianRouletteTable` | `InitRussianRouletteTable` |
 | 27 | `CreateRussianRouletteGame` | `InitRussianRoulette` |
 | 28 | `JoinRussianRouletteGame` | `JoinRussianRoulette` |
@@ -245,7 +244,7 @@ whose randomness is appended by the VRF program.
 | 92 | `RussianRouletteVrfCallback` | `[u8; 32]` randomness, then `u64` round ID and `[u8; 32]` request seed |
 | 93 | `WinnerDrawVrfCallback` | `[u8; 32]` randomness, `u32` winner count, `u32` participant count, `[u8; 32]` users-list hash, then `[u8; 32]` request seed |
 
-Tags `3`, `5`, `6`, `20` through `23`, and `38` through `40` are unused and rejected.
+Tags `3`, `5`, `6`, `20` through `23`, `25`, and `38` through `40` are unused and rejected.
 
 ## Program-Derived Accounts
 
@@ -276,7 +275,7 @@ discriminator.
 | `RaffleManager` | Raffle number and payout configuration |
 | `RaffleState` | Ticket bitmap, pricing, prizes, draw state, VRF value, and retry metadata |
 | `Ticket` | Ticket number, raffle number, beneficiary, and rent payer |
-| `DiceManager` | Minimum stake per face and fixed program fee |
+| `DiceManager` | Minimum stake per face and the 500-basis-point pool fee rate |
 | `DiceGame` | Face ownership, players, snapshotted fee, draw state, VRF value, live generation nonce, and retry metadata |
 | `RussianRouletteGame` | Persistent table configuration, round, seats, result, retry metadata, and settlement time |
 
@@ -319,7 +318,6 @@ signers must be marked as signers in the instruction metas.
 | `SetRaffleManager` | admin, raffle manager, config |
 | `SetDiceManager` | admin, dice manager, config |
 | `InitDiceManager` | admin, dice manager, config, system program |
-| `SetRussianRouletteTable` | admin, roulette table, config |
 | `SetRussianRouletteParticipationFee` | admin, roulette table, config |
 | `InitRussianRouletteTable` | admin, roulette table, config, system program |
 | `CloseRaffle` | admin, raffle, config |
@@ -427,7 +425,7 @@ Initial manager settings are:
 | Setting | Value |
 | --- | ---: |
 | Reveal time | 60 seconds |
-| Fee | 100 basis points (1%) |
+| Fee | 500 basis points (5%) |
 | Minimum stake | 10,000,000 lamports |
 
 ### Raffle
@@ -481,11 +479,13 @@ exposes only tags 43 through 49 for Dice creation and mutation; every builder
 requires the generation value.
 
 Once all six faces are assigned, VRF produces a winning face in `1..=6`. The
-owner of that face receives the six-stake pot minus the fixed dice program fee.
-The fee is snapshotted into the game account when the game is created, so an
-administrative fee update cannot change settlement for an existing game. The
-initial minimum stake is `10,000,000` lamports per face and the initial fee is
-`3,000,000` lamports. `FinalizeDiceDraw` pays the winner and fee manager,
+owner of that face receives the six-stake pot minus a 5% program fee. The
+contract calculates `stake_per_face × 6 × 500 / 10,000` when the pool is
+created and snapshots that lamport amount into the game account. Existing
+pools therefore retain their exact fee. The minimum stake is `10,000,000`
+lamports per face; at that stake the pool is `60,000,000` lamports, the fee is
+`3,000,000` lamports, and the winner receives `57,000,000` lamports.
+`FinalizeDiceDraw` pays the winner and fee manager,
 returns the remaining rent and dust to the stored initializer, then resizes the
 Dice PDA to zero and assigns it to the System Program in the same instruction.
 The game ID can therefore be reused without leaving a per-game terminal account.
@@ -522,19 +522,16 @@ ID to reject stale transactions.
 | 4 | 5 | 1 | 600,000,000 lamports |
 
 Each player pays the fixed stake plus that table's participation fee, which
-defaults to `10,000,000` lamports. An admin can update the fee only while the
-table is open and empty, using the expected round ID; a change advances the
-round ID. Settlement divides the complete six-stake pool by the number of
-survivors. Eliminated players receive zero. Participation fees and any integer
-division remainder are moved to the fee manager.
+defaults to 5% of the stake: `5,000,000` lamports. An admin may update the fee
+while a table is open, including after seats are occupied, using the expected
+round ID. A fee change does not advance or reset that round. Each seat transfers
+the fee configured when it joins, so seated players keep the fee they already
+paid and later players pay the updated fee. Settlement derives the exact total
+fees deposited from table escrow, divides the complete six-stake pool by the
+number of survivors, and routes the deposited fees plus any integer-division
+remainder to the fee manager. Eliminated players receive zero.
 
-Table 0 preserves the legacy primary result exactly:
-
-```text
-u64_le(randomness[0..8]) % 6
-```
-
-For tables `1..4`, the program ranks each zero-based seat index by the full
+For every table, the program ranks each zero-based seat index by the full
 SHA-256 digest of this exact byte sequence, in ascending lexicographic order:
 
 ```text
@@ -564,10 +561,8 @@ normal fee policy. The same instruction clears the table, increments its round,
 and reopens it. All destination accounts are fixed by the stored seats and
 canonical manager PDA, so no player or admin signature is required.
 
-Table initialization and administrative table updates enforce the fixed stake
-and a participation fee below it. `SetRussianRouletteTable` can migrate an open,
-empty legacy table to the fixed stake without changing its fee; a stake change
-advances the existing round ID rather than resetting it.
+Table initialization requires the canonical fixed stake and a participation
+fee below it. Noncanonical existing tables are rejected rather than migrated.
 
 ## MagicBlock VRF
 
