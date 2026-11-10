@@ -62,7 +62,7 @@ impl Init {
         let manager: Manager = Manager {
             is_init: 1,
             allowed_time: 60,
-            fee_percentage: 100,
+            fee_percentage: 500,
             minimum_stake: 10_000_000,
             collected_fee: 0,
         };
@@ -115,7 +115,7 @@ impl Init {
         let dice_manager = DiceManager {
             is_init: 1,
             minimum_stake: 10_000_000,
-            program_fee: 3_000_000,
+            fee_bps: crate::constants::DICE_POOL_FEE_BPS,
         };
 
         dice_manager.serialize(&mut &mut dice_manager_account.data.borrow_mut()[..])?;

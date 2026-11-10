@@ -1,8 +1,9 @@
 use crate::{
     constants::{
-        DICE_GAME_SPACE, DICE_MANAGER_SEED, DICE_PLAYER_COUNT, DICE_SEED, DICE_STATUS_DRAWN,
-        DICE_STATUS_OPEN, DICE_STATUS_PENDING, DICE_STATUS_VRF_FAILED, DICE_VRF_CALLBACK_TAG,
-        DICE_VRF_SEED, MANAGER_SEED, UNDRAWN_DICE_NO,
+        BASIS_POINTS_DENOMINATOR, DICE_GAME_SPACE, DICE_MANAGER_SEED, DICE_PLAYER_COUNT,
+        DICE_POOL_FEE_BPS, DICE_SEED, DICE_STATUS_DRAWN, DICE_STATUS_OPEN, DICE_STATUS_PENDING,
+        DICE_STATUS_VRF_FAILED, DICE_VRF_CALLBACK_TAG, DICE_VRF_SEED, MANAGER_SEED,
+        UNDRAWN_DICE_NO,
     },
     error::RPSProgramError::{
         ArithmeticError, DiceDrawAlreadyRequested, DiceDrawPending, DiceGameNotReady,
@@ -73,7 +74,8 @@ impl Dice {
             .stake
             .checked_mul(DICE_PLAYER_COUNT as u64)
             .ok_or(ArithmeticError)?;
-        if dice_manager.program_fee >= pot {
+        let program_fee = Self::pool_fee(pot, Self::manager_fee_bps(&dice_manager)?)?;
+        if program_fee >= pot {
             return Err(InvalidDiceConfiguration.into());
         }
 
@@ -103,7 +105,7 @@ impl Dice {
             init_dice,
             &selected_dices,
             player.key,
-            dice_manager.program_fee,
+            program_fee,
             generation_token,
         );
 
@@ -583,6 +585,21 @@ impl Dice {
         }
     }
 
+    fn manager_fee_bps(manager: &DiceManager) -> Result<u64, ProgramError> {
+        if manager.fee_bps != DICE_POOL_FEE_BPS {
+            return Err(InvalidDiceConfiguration.into());
+        }
+        Ok(manager.fee_bps)
+    }
+
+    fn pool_fee(pot: u64, fee_bps: u64) -> Result<u64, ProgramError> {
+        let fee = (pot as u128)
+            .checked_mul(fee_bps as u128)
+            .and_then(|value| value.checked_div(BASIS_POINTS_DENOMINATOR as u128))
+            .ok_or(ArithmeticError)?;
+        u64::try_from(fee).map_err(|_| ArithmeticError.into())
+    }
+
     fn require_nonzero_generation_nonce(generation_nonce: &[u8; 32]) -> ProgramResult {
         if *generation_nonce == [0; 32] {
             return Err(DiceGenerationNonceRequired.into());
@@ -840,6 +857,24 @@ impl Dice {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pool_fee_is_five_percent_for_every_stake() {
+        assert_eq!(
+            Dice::pool_fee(60_000_000, DICE_POOL_FEE_BPS).unwrap(),
+            3_000_000
+        );
+        assert_eq!(
+            Dice::pool_fee(600_000_000, DICE_POOL_FEE_BPS).unwrap(),
+            30_000_000
+        );
+        assert!(Dice::manager_fee_bps(&DiceManager {
+            is_init: 1,
+            minimum_stake: 10_000_000,
+            fee_bps: 3_000_000,
+        })
+        .is_err());
+    }
 
     fn game(game_id: u64) -> DiceGame {
         DiceGame {

@@ -25,6 +25,7 @@ use solana_program::{
     program::invoke,
     program_error::ProgramError,
     pubkey::Pubkey,
+    rent::Rent,
     sysvar::{clock::Clock, Sysvar},
 };
 use solana_system_interface::instruction::transfer;
@@ -563,7 +564,7 @@ impl RussianRoulette {
         }
         let primary_eliminated_account = player_accounts[primary_eliminated_index as usize];
         let (survivor_count, survivor_payout, fee_total) =
-            Self::settlement_terms(game, eliminated_count)?;
+            Self::settlement_terms(game_account, game, eliminated_count)?;
 
         manager.collected_fee = manager
             .collected_fee
@@ -603,7 +604,7 @@ impl RussianRoulette {
         game: &RussianRouletteGame,
         manager: &mut Manager,
     ) -> ProgramResult {
-        let participation_fee_total = Self::participation_fee_total(game)?;
+        let participation_fee_total = Self::participation_fee_total(game_account, game)?;
         manager.collected_fee = manager
             .collected_fee
             .checked_add(participation_fee_total)
@@ -768,15 +769,52 @@ impl RussianRoulette {
             .ok_or(ArithmeticError.into())
     }
 
-    fn participation_fee_total(game: &RussianRouletteGame) -> Result<u64, ProgramError> {
-        game.program_fee
+    fn participation_fee_total(
+        game_account: &AccountInfo,
+        game: &RussianRouletteGame,
+    ) -> Result<u64, ProgramError> {
+        Self::participation_fee_total_from_balance(
+            game_account.lamports(),
+            game_account.data_len(),
+            game,
+        )
+    }
+
+    fn participation_fee_total_from_balance(
+        account_balance: u64,
+        account_data_len: usize,
+        game: &RussianRouletteGame,
+    ) -> Result<u64, ProgramError> {
+        // Participation fees are transferred when each seat is taken. Derive
+        // the amount actually deposited so an admin may change the advertised
+        // fee while a round is still open without rewriting what seated
+        // players already paid.
+        let rent_reserve = Rent::default().minimum_balance(account_data_len);
+        let stake_pool = game
+            .stake
             .checked_mul(RUSSIAN_ROULETTE_PLAYER_COUNT as u64)
+            .ok_or(ArithmeticError)?;
+        let non_fee_balance = rent_reserve
+            .checked_add(stake_pool)
+            .ok_or(ArithmeticError)?;
+        account_balance
+            .checked_sub(non_fee_balance)
             .ok_or(ArithmeticError.into())
     }
 
     fn settlement_terms(
+        game_account: &AccountInfo,
         game: &RussianRouletteGame,
         eliminated_count: u8,
+    ) -> Result<(u8, u64, u64), ProgramError> {
+        let participation_fees = Self::participation_fee_total(game_account, game)?;
+        Self::settlement_terms_with_fees(game, eliminated_count, participation_fees)
+    }
+
+    fn settlement_terms_with_fees(
+        game: &RussianRouletteGame,
+        eliminated_count: u8,
+        participation_fees: u64,
     ) -> Result<(u8, u64, u64), ProgramError> {
         let survivor_count = RUSSIAN_ROULETTE_PLAYER_COUNT
             .checked_sub(eliminated_count)
@@ -792,7 +830,7 @@ impl RussianRoulette {
         let remainder = total_stake_pool
             .checked_rem(survivor_count as u64)
             .ok_or(ArithmeticError)?;
-        let fee_total = Self::participation_fee_total(game)?
+        let fee_total = participation_fees
             .checked_add(remainder)
             .ok_or(ArithmeticError)?;
 
@@ -859,9 +897,7 @@ impl RussianRoulette {
 
     /// Returns all six zero-based seat indexes in deterministic result order.
     ///
-    /// Table 0 preserves the original `first_u64_le % 6` primary loser. For
-    /// tables 1 through 4 each seat is ranked by the lexicographically ordered
-    /// SHA-256 digest of:
+    /// Each seat is ranked by the lexicographically ordered SHA-256 digest of:
     ///
     /// `domain || table_id_u8 || round_id_u64_le || randomness_32 || seat_index_u8`
     ///
@@ -874,19 +910,6 @@ impl RussianRoulette {
     ) -> Result<[u8; 6], ProgramError> {
         Self::elimination_count(table_id)?;
         let mut order = [0, 1, 2, 3, 4, 5];
-        if table_id == 0 {
-            let primary = Self::legacy_unlucky_player_index(randomness);
-            order[0] = primary;
-            let mut position = 1;
-            for seat_index in 0..RUSSIAN_ROULETTE_PLAYER_COUNT {
-                if seat_index != primary {
-                    order[position] = seat_index;
-                    position += 1;
-                }
-            }
-            return Ok(order);
-        }
-
         let table_id_bytes = [table_id];
         let round_id_bytes = round_id.to_le_bytes();
         let mut ranked_seats = [([0u8; 32], 0u8); 6];
@@ -933,10 +956,6 @@ impl RussianRoulette {
         Ok(mask)
     }
 
-    fn legacy_unlucky_player_index(randomness: &[u8; 32]) -> u8 {
-        (Self::randomness_number(randomness) % RUSSIAN_ROULETTE_PLAYER_COUNT as u64) as u8
-    }
-
     fn randomness_number(randomness: &[u8; 32]) -> u64 {
         let mut bytes = [0u8; 8];
         bytes.copy_from_slice(&randomness[..8]);
@@ -950,7 +969,7 @@ mod tests {
 
     fn game(program_fee: u64) -> RussianRouletteGame {
         let mut randomness = [0u8; 32];
-        randomness[..8].copy_from_slice(&2u64.to_le_bytes());
+        randomness[..8].copy_from_slice(&9u64.to_le_bytes());
         RussianRouletteGame {
             table_id: 0,
             round_id: 9,
@@ -982,8 +1001,35 @@ mod tests {
             125_000_000
         );
         assert_eq!(
-            RussianRoulette::participation_fee_total(&game).unwrap(),
+            RussianRoulette::participation_fee_total_from_balance(
+                Rent::default()
+                    .minimum_balance(crate::constants::RUSSIAN_ROULETTE_GAME_SPACE as usize)
+                    + game.stake * RUSSIAN_ROULETTE_PLAYER_COUNT as u64
+                    + 150_000_000,
+                crate::constants::RUSSIAN_ROULETTE_GAME_SPACE as usize,
+                &game,
+            )
+            .unwrap(),
             150_000_000
+        );
+    }
+
+    #[test]
+    fn mid_round_fee_change_preserves_fees_already_deposited() {
+        let game = game(5_000_000);
+        let actual_fees = 3 * 10_000_000 + 3 * 5_000_000;
+        let rent =
+            Rent::default().minimum_balance(crate::constants::RUSSIAN_ROULETTE_GAME_SPACE as usize);
+        let balance = rent + game.stake * RUSSIAN_ROULETTE_PLAYER_COUNT as u64 + actual_fees;
+
+        assert_eq!(
+            RussianRoulette::participation_fee_total_from_balance(
+                balance,
+                crate::constants::RUSSIAN_ROULETTE_GAME_SPACE as usize,
+                &game,
+            )
+            .unwrap(),
+            actual_fees
         );
     }
 
@@ -999,7 +1045,7 @@ mod tests {
     fn elimination_order_matches_the_cross_language_reference_vectors() {
         let randomness: [u8; 32] = core::array::from_fn(|index| index as u8);
         let expected_orders = [
-            [4, 0, 1, 2, 3, 5],
+            [4, 1, 2, 0, 3, 5],
             [4, 0, 1, 5, 3, 2],
             [0, 5, 4, 2, 1, 3],
             [5, 2, 0, 1, 3, 4],
@@ -1013,16 +1059,6 @@ mod tests {
             let mask = RussianRoulette::eliminated_mask(&order, eliminated_count).unwrap();
             assert_eq!(mask.count_ones(), eliminated_count as u32);
             assert_eq!(order[0], expected_orders[table_id as usize][0]);
-        }
-    }
-
-    #[test]
-    fn starter_table_preserves_the_legacy_primary_loser() {
-        for random_u64 in [0, 1, 5, 6, 42, u64::MAX] {
-            let mut randomness = [0u8; 32];
-            randomness[..8].copy_from_slice(&random_u64.to_le_bytes());
-            let order = RussianRoulette::elimination_order(0, 999, &randomness).unwrap();
-            assert_eq!(order[0], (random_u64 % 6) as u8);
         }
     }
 
@@ -1047,8 +1083,12 @@ mod tests {
         let participation_fees = table.program_fee * RUSSIAN_ROULETTE_PLAYER_COUNT as u64;
 
         for eliminated_count in 1..RUSSIAN_ROULETTE_PLAYER_COUNT {
-            let (survivors, payout, fees) =
-                RussianRoulette::settlement_terms(&table, eliminated_count).unwrap();
+            let (survivors, payout, fees) = RussianRoulette::settlement_terms_with_fees(
+                &table,
+                eliminated_count,
+                participation_fees,
+            )
+            .unwrap();
             assert_eq!(survivors, RUSSIAN_ROULETTE_PLAYER_COUNT - eliminated_count);
             assert_eq!(payout, total_pool / survivors as u64);
             assert_eq!(fees, participation_fees + total_pool % survivors as u64);
@@ -1259,7 +1299,8 @@ mod tests {
         let player_5_key = Pubkey::new_from_array(game.seat_5);
         let player_6_key = Pubkey::new_from_array(game.seat_6);
 
-        let table_balance = 2_000_000;
+        let table_balance =
+            Rent::default().minimum_balance(crate::constants::RUSSIAN_ROULETTE_GAME_SPACE as usize);
         let deposited_balance = (game.stake + game.program_fee) * 6;
         let manager_starting_balance = 3_000_000;
         let mut game_lamports = table_balance + deposited_balance;
@@ -1270,7 +1311,7 @@ mod tests {
         let mut player_4_lamports = 0;
         let mut player_5_lamports = 0;
         let mut player_6_lamports = 0;
-        let mut game_data = [];
+        let mut game_data = vec![0u8; crate::constants::RUSSIAN_ROULETTE_GAME_SPACE as usize];
         let mut manager_data = [];
         let mut player_1_data = [];
         let mut player_2_data = [];
@@ -1430,13 +1471,14 @@ mod tests {
         let game_key = Pubkey::new_unique();
         let manager_key = Pubkey::new_unique();
         let player_key = Pubkey::new_unique();
-        let rent = 37;
+        let rent =
+            Rent::default().minimum_balance(crate::constants::RUSSIAN_ROULETTE_GAME_SPACE as usize);
         let manager_start = 50;
         let player_start = 10;
         let mut game_lamports = rent + (game.stake + game.program_fee) * 6;
         let mut manager_lamports = manager_start;
         let mut player_lamports = player_start;
-        let mut game_data = [];
+        let mut game_data = vec![0u8; crate::constants::RUSSIAN_ROULETTE_GAME_SPACE as usize];
         let mut manager_data = [];
         let mut player_data = [];
         let game_account = AccountInfo::new(

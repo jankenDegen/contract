@@ -3,7 +3,7 @@ use crate::{
     state::{
         Buy, DiceManager, InitDice, InitGame, InitRussianRoulette, InitRussianRouletteTable,
         JoinDice, JoinGame, JoinRussianRoulette, Manager, RaffleManager, Reveal,
-        UpdateRussianRouletteParticipationFee, UpdateRussianRouletteTable,
+        UpdateRussianRouletteParticipationFee,
     },
 };
 use borsh::BorshDeserialize;
@@ -47,9 +47,6 @@ pub enum RPSProgramInstruction {
     },
     InitDiceManager,
     CloseDiceGame,
-    SetRussianRouletteTable {
-        new_table: UpdateRussianRouletteTable,
-    },
     InitRussianRouletteTable {
         init_table: InitRussianRouletteTable,
     },
@@ -159,9 +156,6 @@ impl RPSProgramInstruction {
                 Self::require_empty(rest)?;
                 Self::CloseDiceGame
             }
-            25 => Self::SetRussianRouletteTable {
-                new_table: UpdateRussianRouletteTable::try_from_slice(&rest)?,
-            },
             26 => Self::InitRussianRouletteTable {
                 init_table: InitRussianRouletteTable::try_from_slice(&rest)?,
             },
@@ -341,6 +335,14 @@ mod tests {
     }
 
     #[test]
+    fn retired_roulette_table_migration_tag_is_rejected() {
+        assert!(RPSProgramInstruction::unpack(&[25]).is_err());
+        let mut former_payload = vec![25];
+        former_payload.extend_from_slice(&[0; 16]);
+        assert!(RPSProgramInstruction::unpack(&former_payload).is_err());
+    }
+
+    #[test]
     fn roulette_participation_fee_instruction_decodes_expected_round_and_fee() {
         let update = UpdateRussianRouletteParticipationFee {
             expected_round_id: 74,
@@ -375,6 +377,9 @@ mod tests {
         let mut join_data = vec![28];
         join.serialize(&mut join_data).unwrap();
 
+        assert_eq!(init_data.len(), 11);
+        assert_eq!(join_data.len(), 10);
+
         assert_eq!(
             RPSProgramInstruction::unpack(&init_data).unwrap(),
             RPSProgramInstruction::CreateRussianRouletteGame { init_game: init }
@@ -385,6 +390,10 @@ mod tests {
         );
         assert!(RPSProgramInstruction::unpack(&[27, 2, 4]).is_err());
         assert!(RPSProgramInstruction::unpack(&[28, 5]).is_err());
+        init_data.extend_from_slice(&5_000_000u64.to_le_bytes());
+        join_data.extend_from_slice(&5_000_000u64.to_le_bytes());
+        assert!(RPSProgramInstruction::unpack(&init_data).is_err());
+        assert!(RPSProgramInstruction::unpack(&join_data).is_err());
     }
 
     #[test]

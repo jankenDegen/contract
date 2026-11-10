@@ -72,9 +72,6 @@ impl Processor {
                 randomness,
             } => Dice::consume_vrf_randomness(accounts, program_id, expected_vrf_seed, randomness),
             RPSProgramInstruction::CloseDiceGame => Admin::close_dice_game(accounts, program_id),
-            RPSProgramInstruction::SetRussianRouletteTable { new_table } => {
-                Admin::set_russian_roulette_table(accounts, program_id, new_table)
-            }
             RPSProgramInstruction::InitRussianRouletteTable { init_table } => {
                 Init::init_russian_roulette_table(accounts, program_id, init_table)
             }

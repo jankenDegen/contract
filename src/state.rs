@@ -108,7 +108,8 @@ pub struct RaffleManager {
 pub struct DiceManager {
     pub is_init: u8,
     pub minimum_stake: u64,
-    pub program_fee: u64,
+    /// Fee applied to the complete six-face pool, in basis points.
+    pub fee_bps: u64,
 }
 
 #[derive(BorshSerialize, BorshDeserialize, Debug, Clone, PartialEq, Copy)]
@@ -134,12 +135,6 @@ pub struct JoinDice {
 #[derive(BorshSerialize, BorshDeserialize, Debug, Clone, PartialEq, Copy)]
 pub struct InitRussianRouletteTable {
     pub table_id: u8,
-    pub stake: u64,
-    pub program_fee: u64,
-}
-
-#[derive(BorshSerialize, BorshDeserialize, Debug, Clone, PartialEq, Copy)]
-pub struct UpdateRussianRouletteTable {
     pub stake: u64,
     pub program_fee: u64,
 }
@@ -198,11 +193,11 @@ pub struct RussianRouletteGame {
     pub seat_4: [u8; 32],
     pub seat_5: [u8; 32],
     pub seat_6: [u8; 32],
-    /// Primary eliminated seat index, retained as a singular compatibility field.
-    /// The complete eliminated set is derived from `vrf_seed`, `table_id`, and `round_id`.
+    /// Primary eliminated seat index. The complete eliminated set is derived
+    /// from `vrf_seed`, `table_id`, and `round_id`.
     pub unlucky_player_index: u8,
     pub vrf_seed: [u8; 32],
-    /// Primary eliminated player, retained as a singular compatibility field.
+    /// Primary eliminated player.
     pub unlucky_player: [u8; 32],
     pub vrf_last_request_at: i64,
     pub vrf_retry_count: u8,
